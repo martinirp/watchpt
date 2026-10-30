@@ -138,16 +138,54 @@ app.get('/host', (req, res) => {
 });
 
 // ─── Estado do Stream ──────────────────────────────────────
-let streamerSocketId = null;
-let streamerUsername = null;
-const viewers = new Map();
-let streamInfo = {
-  isLive: false,
-  title: 'Transmissão ao Vivo',
-  username: null,
-  type: 'screen',
-  startedAt: null
-};
+// Cada streamer conectado pode ter a própria live (multi-stream).
+const streams = new Map();  // streamerSocketId -> { id, username, title, type, startedAt, viewers }
+const viewers = new Map();  // viewerSocketId   -> { id, username, joinedAt, watching }
+
+function publicStreams() {
+  return Array.from(streams.values())
+    .map(s => ({
+      id: s.id,
+      username: s.username,
+      title: s.title,
+      type: s.type,
+      startedAt: s.startedAt,
+      viewerCount: s.viewers.size
+    }))
+    .sort((a, b) => b.startedAt - a.startedAt);
+}
+
+function broadcastStreams() {
+  io.emit('streams-list', publicStreams());
+}
+
+function streamRoom(streamerId) {
+  return `stream:${streamerId}`;
+}
+
+// Remove um espectador de uma live e avisa o streamer
+function detachViewer(viewerId, streamerId) {
+  const st = streams.get(streamerId);
+  if (!st || !st.viewers.has(viewerId)) return;
+  st.viewers.delete(viewerId);
+  io.to(streamerId).emit('viewer-left', { viewerId });
+  io.to(streamerId).emit('viewer-count', st.viewers.size);
+  io.to(streamerId).emit('current-viewers', Array.from(st.viewers.values()));
+  broadcastStreams();
+}
+
+// Encerra uma live (streamer parou ou desconectou)
+function endStream(streamerId) {
+  const st = streams.get(streamerId);
+  if (!st) return;
+  streams.delete(streamerId);
+  st.viewers.forEach((_v, viewerId) => {
+    io.to(viewerId).emit('stream-ended', { streamerId });
+    const v = viewers.get(viewerId);
+    if (v && v.watching === streamerId) v.watching = null;
+  });
+  broadcastStreams();
+}
 
 function setupSocketIo() {
   io.on('connection', (socket) => {
@@ -164,53 +202,78 @@ function setupSocketIo() {
     const { username } = session;
   console.log(`[Socket] Conectado: ${username} (${socket.id})`);
 
-  // ── Entrar como espectador ──────────────────────────────
+  // ── Entrar como espectador (lobby) ──────────────────────
   socket.on('join-as-viewer', () => {
-    viewers.set(socket.id, { id: socket.id, username, joinedAt: Date.now() });
-    socket.join('viewers');
-    console.log(`[Viewer] Entrou: ${username} (${socket.id})`);
+    if (!viewers.has(socket.id)) {
+      viewers.set(socket.id, { id: socket.id, username, joinedAt: Date.now(), watching: null });
+      console.log(`[Viewer] Entrou: ${username} (${socket.id})`);
+    }
+    socket.emit('streams-list', publicStreams());
+    io.emit('viewer-count', viewers.size);
+  });
 
-    // Informar estado atual do stream
-    socket.emit('stream-status', {
-      ...streamInfo,
-      hostAvailable: !!streamerSocketId,
-      streamerUsername
-    });
+  // ── Escolher (ou sair de) uma live ──────────────────────
+  socket.on('watch-stream', ({ streamerId } = {}) => {
+    const v = viewers.get(socket.id) || { id: socket.id, username, joinedAt: Date.now(), watching: null };
+    const previous = v.watching;
 
-    // Se a live já está rolando, pedir para o streamer criar a oferta para este viewer
-    if (streamerSocketId && streamInfo.isLive && streamerSocketId !== socket.id) {
-      io.to(streamerSocketId).emit('viewer-joined', { viewerId: socket.id, username });
+    if (previous && previous !== streamerId) {
+      detachViewer(socket.id, previous);
+      socket.leave(streamRoom(previous));
+      v.watching = null;
     }
 
-    io.emit('viewer-count', viewers.size);
-    io.emit('viewers-list', Array.from(viewers.values()));
+    if (!streamerId) {
+      v.watching = null;
+      viewers.set(socket.id, v);
+      socket.emit('streams-list', publicStreams());
+      return;
+    }
+
+    const st = streams.get(streamerId);
+    if (!st) {
+      v.watching = null;
+      viewers.set(socket.id, v);
+      socket.emit('stream-ended', { streamerId });
+      socket.emit('streams-list', publicStreams());
+      return;
+    }
+
+    v.watching = streamerId;
+    viewers.set(socket.id, v);
+    socket.join(streamRoom(streamerId));
+    console.log(`[Viewer] ${username} assistindo ${st.username}`);
+
+    if (!st.viewers.has(socket.id)) {
+      st.viewers.set(socket.id, { id: socket.id, username, joinedAt: Date.now() });
+      io.to(streamerId).emit('viewer-joined', { viewerId: socket.id, username });
+      io.to(streamerId).emit('current-viewers', Array.from(st.viewers.values()));
+      io.to(streamerId).emit('viewer-count', st.viewers.size);
+      broadcastStreams();
+    }
+
+    socket.emit('stream-info', {
+      id: st.id,
+      username: st.username,
+      title: st.title,
+      type: st.type,
+      startedAt: st.startedAt,
+      viewerCount: st.viewers.size
+    });
   });
 
   // Permitir que o espectador peça oferta caso ainda não tenha recebido
   socket.on('request-offer', () => {
-    if (streamerSocketId && streamInfo.isLive && socket.id !== streamerSocketId) {
-      console.log(`[Signaling] Viewer ${username} solicitou oferta WebRTC`);
-      io.to(streamerSocketId).emit('viewer-joined', { viewerId: socket.id, username });
-    }
+    const v = viewers.get(socket.id);
+    if (!v || !v.watching || !streams.has(v.watching)) return;
+    console.log(`[Signaling] Viewer ${username} solicitou oferta WebRTC`);
+    io.to(v.watching).emit('viewer-joined', { viewerId: socket.id, username });
   });
 
   // ── Registrar como streamer (aceita register-streamer e register-host) ──
   const handleRegisterStreamer = () => {
-    if (streamerSocketId && streamerSocketId !== socket.id) {
-      socket.emit('streamer-conflict', {
-        message: `${streamerUsername} já está transmitindo no momento. Aguarde ele terminar.`
-      });
-      return;
-    }
-    streamerSocketId = socket.id;
-    streamerUsername = username;
     console.log(`[Streamer] Registrado: ${username} (${socket.id})`);
     socket.emit('streamer-registered', { ok: true, username });
-    io.emit('stream-status', {
-      ...streamInfo,
-      hostAvailable: true,
-      streamerUsername
-    });
   };
 
   socket.on('register-streamer', handleRegisterStreamer);
@@ -218,46 +281,27 @@ function setupSocketIo() {
 
   // ── Iniciar stream ──────────────────────────────────────
   socket.on('stream-started', (info) => {
-    if (socket.id !== streamerSocketId) {
-      // Se não estava registrado ainda, registrar agora
-      streamerSocketId = socket.id;
-      streamerUsername = username;
-    }
-
-    streamInfo = {
-      isLive: true,
-      title: (info && info.title) || 'Transmissão ao Vivo',
+    const stream = {
+      id: socket.id,
       username,
+      title: (info && info.title) || 'Transmissão ao Vivo',
       type: (info && info.type) || 'screen',
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      viewers: new Map()
     };
-    console.log(`[Stream] Iniciado por ${username}: "${streamInfo.title}"`);
-    io.emit('stream-status', {
-      ...streamInfo,
-      hostAvailable: true,
-      streamerUsername: username
-    });
-
-    // Conectar a TODOS os espectadores atualmente conectados!
-    viewers.forEach((v, vSocketId) => {
-      if (vSocketId !== streamerSocketId) {
-        socket.emit('viewer-joined', { viewerId: vSocketId, username: v.username });
-      }
-    });
+    streams.set(socket.id, stream);
+    socket.join(streamRoom(socket.id));
+    console.log(`[Stream] Iniciado por ${username}: "${stream.title}"`);
+    socket.emit('stream-started-ok', { id: socket.id });
+    broadcastStreams();
   });
 
   // ── Parar stream ────────────────────────────────────────
   socket.on('stream-stopped', () => {
-    if (socket.id !== streamerSocketId) return;
-    streamInfo = { isLive: false, title: streamInfo.title, username: null, type: 'screen', startedAt: null };
-    streamerSocketId = null;
-    streamerUsername = null;
+    if (!streams.has(socket.id)) return;
     console.log(`[Stream] Parado por ${username}`);
-    io.emit('stream-status', {
-      ...streamInfo,
-      hostAvailable: false,
-      streamerUsername: null
-    });
+    socket.leave(streamRoom(socket.id));
+    endStream(socket.id);
   });
 
   // ── WebRTC: Oferta do Streamer ──────────────────────────
@@ -275,13 +319,21 @@ function setupSocketIo() {
     io.to(targetId).emit('webrtc-ice-candidate', { senderId: socket.id, candidate });
   });
 
+  // ── Sala atual (live que este socket está assistindo/transmitindo) ──
+  function currentRoom() {
+    if (streams.has(socket.id)) return streamRoom(socket.id);
+    const v = viewers.get(socket.id);
+    return v && v.watching ? streamRoom(v.watching) : null;
+  }
+
   // ── Chat ────────────────────────────────────────────────
   socket.on('chat-message', (data) => {
-    const isStreamer = socket.id === streamerSocketId;
-    io.emit('chat-message', {
+    const room = currentRoom();
+    if (!room) return;
+    io.to(room).emit('chat-message', {
       id: crypto.randomUUID().substring(0, 8),
       sender: username,
-      isStreamer,
+      isStreamer: streams.has(socket.id),
       text: String(data.text || '').substring(0, 300),
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     });
@@ -289,29 +341,24 @@ function setupSocketIo() {
 
   // ── Reações ─────────────────────────────────────────────
   socket.on('send-reaction', ({ emoji }) => {
-    io.emit('new-reaction', { emoji: emoji || '🔥', sender: username });
+    const room = currentRoom();
+    if (!room) return;
+    io.to(room).emit('new-reaction', { emoji: emoji || '🔥', sender: username });
   });
 
   // ── Desconexão ──────────────────────────────────────────
   socket.on('disconnect', () => {
     console.log(`[Socket] Desconectado: ${username} (${socket.id})`);
 
-    if (socket.id === streamerSocketId) {
-      streamerSocketId = null;
-      streamerUsername = null;
-      streamInfo.isLive = false;
-      streamInfo.username = null;
-      io.emit('stream-status', { ...streamInfo, hostAvailable: false });
-    }
+    // Era streamer? Encerra a live e avisa quem estava assistindo.
+    if (streams.has(socket.id)) endStream(socket.id);
 
-    if (viewers.has(socket.id)) {
+    // Era espectador? Sai da live que estava assistindo.
+    const v = viewers.get(socket.id);
+    if (v) {
+      if (v.watching) detachViewer(socket.id, v.watching);
       viewers.delete(socket.id);
-      // Notificar streamer para limpar peer
-      if (streamerSocketId) {
-        io.to(streamerSocketId).emit('viewer-left', { viewerId: socket.id });
-      }
       io.emit('viewer-count', viewers.size);
-      io.emit('viewers-list', Array.from(viewers.values()));
     }
   });
   });

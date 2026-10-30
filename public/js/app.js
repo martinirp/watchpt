@@ -54,6 +54,18 @@ const liveBadge = document.getElementById('liveBadge');
 const viewerCountEl = document.getElementById('viewerCount');
 const floatingContainer = document.getElementById('floatingReactions');
 
+// Lobby (lista de lives)
+const lobbyView = document.getElementById('lobbyView');
+const watchView = document.getElementById('watchView');
+const lobbyGrid = document.getElementById('lobbyGrid');
+const lobbyEmpty = document.getElementById('lobbyEmpty');
+const lobbySubtitle = document.getElementById('lobbySubtitle');
+const btnBackLobby = document.getElementById('btnBackLobby');
+const btnRefreshLobby = document.getElementById('btnRefreshLobby');
+
+const ICON_PLAY = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
+const ICON_PAUSE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`;
+
 // Controles de vídeo
 const btnPlayPause = document.getElementById('btnPlayPause');
 const btnMute = document.getElementById('btnMute');
@@ -92,6 +104,9 @@ const btnHeaderShare = document.getElementById('btnHeaderShare');
 // 3. Estado da Aplicação
 let viewerPeerConn = null;
 let viewerIceQueue = [];
+
+let activeStreams = [];
+let watchingStreamId = null;
 
 let isBroadcaster = false;
 let broadcasterStream = null;
@@ -428,58 +443,192 @@ socket.on('streamer-conflict', ({ message }) => {
 });
 
 // ============================================================
-// 11. Lógica do Espectador (Viewer)
+// 11. Lobby de Lives + Lógica do Espectador (Viewer)
 // ============================================================
 
-// Registrar como espectador na sala
-socket.emit('join-as-viewer');
+let currentStreamMeta = null;
 
-// Status da transmissão
-socket.on('stream-status', (status) => {
-  console.log('[Viewer] Status do stream recebido:', status);
+function showLobby() {
+  lobbyView.classList.remove('is-hidden');
+  watchView.classList.add('is-hidden');
+}
 
-  if (streamTitleEl && status.title) {
-    streamTitleEl.textContent = status.title;
+function showWatch() {
+  lobbyView.classList.add('is-hidden');
+  watchView.classList.remove('is-hidden');
+}
+
+function timeAgo(ts) {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return 'agora';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `há ${m} min`;
+  const h = Math.floor(m / 60);
+  return `há ${h}h`;
+}
+
+function buildLiveCard(stream) {
+  const isMine = stream.username === currentUsername;
+  const initial = (stream.username || '?').charAt(0).toUpperCase();
+  const started = stream.startedAt ? timeAgo(stream.startedAt) : '';
+
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = 'live-card';
+  card.dataset.streamId = stream.id;
+  card.innerHTML = `
+    <span class="live-card-avatar">${escapeHtml(initial)}</span>
+    <span class="live-card-body">
+      <span class="live-card-top">
+        <span class="live-card-user">${escapeHtml(stream.username)}</span>
+        <span class="live-card-badge"><span class="pulse-dot"></span>AO VIVO</span>
+      </span>
+      <span class="live-card-title">${escapeHtml(stream.title)}</span>
+      <span class="live-card-meta">
+        <span>👁 ${stream.viewerCount || 0} ${stream.viewerCount === 1 ? 'espectador' : 'espectadores'}</span>
+        ${started ? `<span>· ${started}</span>` : ''}
+        ${isMine ? '<span class="live-card-mine">· sua live</span>' : ''}
+      </span>
+    </span>
+    <span class="live-card-play">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+    </span>
+  `;
+
+  card.addEventListener('click', () => {
+    if (isMine) {
+      showToast('Você é quem está transmitindo esta live.', 'info');
+      openStudioModal();
+      return;
+    }
+    startWatching(stream);
+  });
+
+  return card;
+}
+
+function renderLobby() {
+  if (!lobbyGrid) return;
+  lobbyGrid.innerHTML = '';
+
+  if (!activeStreams.length) {
+    lobbyEmpty.classList.remove('is-hidden');
+    lobbySubtitle.textContent = 'Nenhuma transmissão ativa no momento';
+    return;
   }
 
-  if (status.isLive) {
+  lobbyEmpty.classList.add('is-hidden');
+  lobbySubtitle.textContent = activeStreams.length === 1
+    ? '1 live disponível — clique para assistir'
+    : `${activeStreams.length} lives disponíveis — clique para assistir`;
+  activeStreams.forEach(s => lobbyGrid.appendChild(buildLiveCard(s)));
+}
+
+function startWatching(stream) {
+  watchingStreamId = stream.id;
+  currentStreamMeta = stream;
+
+  closeViewerPeer();
+
+  if (streamTitleEl) streamTitleEl.textContent = stream.title;
+  if (streamerByInfo) streamerByInfo.innerHTML = `Transmitido por <strong>${escapeHtml(stream.username)}</strong> · P2P WebRTC`;
+  remoteVideo.srcObject = null;
+  streamPlaceholder.classList.remove('hidden');
+  placeholderTitle.textContent = 'Conectando à live...';
+  placeholderDesc.textContent = 'Aguarde enquanto a transmissão é estabelecida.';
+
+  showWatch();
+  socket.emit('watch-stream', { streamerId: stream.id });
+
+  setTimeout(() => {
+    if (watchingStreamId === stream.id && !remoteVideo.srcObject) {
+      socket.emit('request-offer');
+    }
+  }, 1200);
+}
+
+function closeViewerPeer() {
+  if (viewerPeerConn) {
+    try { viewerPeerConn.close(); } catch (e) {}
+    viewerPeerConn = null;
+  }
+  viewerIceQueue = [];
+}
+
+function stopWatching() {
+  if (watchingStreamId) {
+    socket.emit('watch-stream', { streamerId: null });
+    watchingStreamId = null;
+  }
+  currentStreamMeta = null;
+  closeViewerPeer();
+  remoteVideo.srcObject = null;
+  if (btnPlayPause) btnPlayPause.innerHTML = ICON_PLAY;
+  showLobby();
+}
+
+if (btnBackLobby) btnBackLobby.addEventListener('click', stopWatching);
+if (btnRefreshLobby) btnRefreshLobby.addEventListener('click', () => socket.emit('join-as-viewer'));
+
+// Registrar como espectador para receber a lista de lives
+// (reemite ao reconectar, para o socket.id novo voltar a receber a lista)
+socket.on('connect', () => {
+  socket.emit('join-as-viewer');
+  if (watchingStreamId) socket.emit('watch-stream', { streamerId: watchingStreamId });
+});
+socket.emit('join-as-viewer');
+showLobby();
+renderLobby();
+
+// Lista de lives atualizada pelo servidor
+socket.on('streams-list', (list) => {
+  activeStreams = Array.isArray(list) ? list : [];
+
+  if (watchingStreamId) {
+    const meta = activeStreams.find(s => s.id === watchingStreamId);
+    if (meta) {
+      currentStreamMeta = meta;
+      if (streamTitleEl) streamTitleEl.textContent = meta.title;
+    }
+  }
+
+  renderLobby();
+
+  if (activeStreams.length > 0) {
     liveBadge.classList.remove('offline');
     liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
-
-    if (status.streamerUsername) {
-      if (status.streamerUsername === currentUsername) {
-        streamerByInfo.innerHTML = `👑 Você está transmitindo · Latência ultra baixa`;
-      } else {
-        streamerByInfo.innerHTML = `Transmitido por <strong>${status.streamerUsername}</strong> · P2P WebRTC`;
-      }
-    }
-
-    // Se sou o broadcaster, o meu preview já está no estúdio. Se sou viewer e não tenho vídeo, pedir oferta!
-    if (!isBroadcaster) {
-      setTimeout(() => {
-        if (!remoteVideo.srcObject) {
-          socket.emit('request-offer');
-        }
-      }, 1000);
-    }
   } else {
     liveBadge.classList.add('offline');
     liveBadge.innerHTML = `<span class="pulse-dot"></span> OFFLINE`;
-    streamPlaceholder.classList.remove('hidden');
-    streamerByInfo.textContent = '⚡ WebRTC P2P · Latência ultra baixa';
+  }
 
-    if (placeholderTitle) {
-      placeholderTitle.textContent = 'Nenhuma Transmissão no Momento';
-    }
-    if (placeholderDesc) {
-      placeholderDesc.innerHTML = 'Aguardando alguém iniciar. Você também pode transmitir! Clique em <strong>"Iniciar Transmissão"</strong> acima.';
-    }
-
-    if (remoteVideo.srcObject) {
-      remoteVideo.srcObject = null;
-    }
+  if (watchingStreamId && !activeStreams.some(s => s.id === watchingStreamId)) {
+    if (currentStreamMeta) showToast('A live que você assistia foi encerrada.', 'info');
+    stopWatching();
   }
 });
+
+// Confirmação de que a live escolhida existe
+socket.on('stream-info', (stream) => {
+  if (!stream || stream.id !== watchingStreamId) return;
+  currentStreamMeta = stream;
+  if (streamTitleEl) streamTitleEl.textContent = stream.title;
+  if (streamerByInfo) streamerByInfo.innerHTML = `Transmitido por <strong>${escapeHtml(stream.username)}</strong> · P2P WebRTC`;
+});
+
+// A live que estou assistindo foi encerrada
+socket.on('stream-ended', ({ streamerId } = {}) => {
+  if (!watchingStreamId) return;
+  if (streamerId && streamerId !== watchingStreamId) return;
+  showToast('A transmissão foi encerrada.', 'info');
+  stopWatching();
+});
+
+// Ao começar a transmitir, sai da live que estiver assistindo
+socket.on('stream-started-ok', () => {
+  if (watchingStreamId) stopWatching();
+});
+
 
 // Quantidade de espectadores
 socket.on('viewer-count', (count) => {
@@ -488,7 +637,7 @@ socket.on('viewer-count', (count) => {
 
 // Receber oferta WebRTC do Broadcaster
 socket.on('webrtc-offer', async ({ senderId, sdp }) => {
-  if (isBroadcaster) return; // Se eu sou o streamer, ignorar oferta externa
+  if (!watchingStreamId || senderId !== watchingStreamId) return; // Só aceita a live que estou assistindo
 
   console.log('[Viewer] Oferta WebRTC recebida do Broadcaster...');
 
@@ -555,10 +704,10 @@ if (btnPlayPause) {
     if (!remoteVideo.srcObject) return;
     if (remoteVideo.paused) {
       remoteVideo.play();
-      btnPlayPause.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`;
+      btnPlayPause.innerHTML = ICON_PAUSE;
     } else {
       remoteVideo.pause();
-      btnPlayPause.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
+      btnPlayPause.innerHTML = ICON_PLAY;
     }
   });
 }

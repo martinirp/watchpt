@@ -67,8 +67,39 @@
     </div>
   </header>
 
+  <!-- Lobby: lista de quem está ao vivo -->
+  <section id="lobbyView" class="lobby-view">
+    <div class="lobby-inner">
+      <div class="lobby-head">
+        <div class="lobby-head-text">
+          <h1 class="lobby-title">Lives ao vivo</h1>
+          <p id="lobbySubtitle" class="lobby-subtitle">Carregando transmissões...</p>
+        </div>
+        <button id="btnRefreshLobby" class="btn-lobby-refresh">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+          </svg>
+          Atualizar
+        </button>
+      </div>
+
+      <div id="lobbyGrid" class="live-grid"></div>
+
+      <div id="lobbyEmpty" class="lobby-empty">
+        <div class="lobby-empty-icon">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>
+          </svg>
+        </div>
+        <h2>Nenhuma live no momento</h2>
+        <p>Aguardando alguém iniciar. Clique em <strong>"Iniciar Transmissão"</strong> para começar a sua.</p>
+      </div>
+    </div>
+  </section>
+
   <!-- Conteúdo Principal -->
-  <main class="main-wrapper">
+  <main id="watchView" class="main-wrapper is-hidden">
     <!-- Área de Vídeo -->
     <section class="stream-container">
       <div class="video-theater">
@@ -86,9 +117,9 @@
               <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>
             </svg>
           </div>
-          <div id="placeholderTitle" class="placeholder-title">Nenhuma Transmissão ao Vivo</div>
+          <div id="placeholderTitle" class="placeholder-title">Conectando à live...</div>
           <div id="placeholderDesc" class="placeholder-desc">
-            Aguardando alguém iniciar. Você também pode transmitir! Clique no botão <strong>"Iniciar Transmissão"</strong> acima.
+            Aguarde enquanto a transmissão é estabelecida.
           </div>
         </div>
 
@@ -122,10 +153,18 @@
 
       <!-- Barra de Informações do Stream -->
       <div class="stream-info-bar">
-        <div class="stream-title-box">
-          <h1 id="streamTitle">Transmissão ao Vivo</h1>
-          <div class="stream-meta">
-            <span id="streamerByInfo">⚡ WebRTC P2P · Latência ultra baixa</span>
+        <div class="stream-info-left">
+          <button id="btnBackLobby" class="btn-back-lobby" title="Voltar para a lista de lives">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+            </svg>
+            <span>Voltar</span>
+          </button>
+          <div class="stream-title-box">
+            <h1 id="streamTitle">Transmissão ao Vivo</h1>
+            <div class="stream-meta">
+              <span id="streamerByInfo">⚡ WebRTC P2P · Latência ultra baixa</span>
+            </div>
           </div>
         </div>
         <div class="reactions-quick-bar">
