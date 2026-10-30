@@ -140,6 +140,7 @@ app.get('/host', (req, res) => {
 // ─── Estado do Stream ──────────────────────────────────────
 let streamerSocketId = null;
 let streamerUsername = null;
+const viewers = new Map();
 let streamInfo = {
   isLive: false,
   title: 'Transmissão ao Vivo',
@@ -312,6 +313,7 @@ function setupSocketIo() {
       io.emit('viewer-count', viewers.size);
       io.emit('viewers-list', Array.from(viewers.values()));
     }
+  });
   });
 }
 
