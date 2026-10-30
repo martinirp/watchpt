@@ -107,6 +107,8 @@ let viewerIceQueue = [];
 
 let activeStreams = [];
 let watchingStreamId = null;
+let isWatchingSelf = false; // streamer vendo o próprio feed + chat
+let currentBroadcastTitle = 'Minha transmissão';
 
 let isBroadcaster = false;
 let broadcasterStream = null;
@@ -256,6 +258,7 @@ if (btnStudioStart) {
       socket.emit('register-streamer');
 
       const streamTitle = (studioTitleInput && studioTitleInput.value.trim()) || 'Transmissão ao Vivo';
+      currentBroadcastTitle = streamTitle;
 
       socket.emit('stream-started', {
         title: streamTitle,
@@ -314,6 +317,13 @@ function stopBroadcasting() {
     socket.emit('stream-stopped');
     isBroadcaster = false;
     showToast('Transmissão encerrada.', 'info');
+  }
+
+  if (isWatchingSelf) {
+    isWatchingSelf = false;
+    remoteVideo.srcObject = null;
+    if (btnPlayPause) btnPlayPause.innerHTML = ICON_PLAY;
+    showLobby();
   }
 
   updateBroadcasterUI(false);
@@ -497,8 +507,12 @@ function buildLiveCard(stream) {
 
   card.addEventListener('click', () => {
     if (isMine) {
-      showToast('Você é quem está transmitindo esta live.', 'info');
-      openStudioModal();
+      if (isBroadcaster && broadcasterStream) {
+        enterSelfView();
+      } else {
+        showToast('Você é quem está transmitindo esta live.', 'info');
+        openStudioModal();
+      }
       return;
     }
     startWatching(stream);
@@ -527,6 +541,13 @@ function renderLobby() {
 function startWatching(stream) {
   watchingStreamId = stream.id;
   currentStreamMeta = stream;
+  const wasSelfView = isWatchingSelf;
+  isWatchingSelf = false;
+
+  if (wasSelfView) {
+    remoteVideo.muted = false;
+    updateMuteUI();
+  }
 
   closeViewerPeer();
 
@@ -555,11 +576,41 @@ function closeViewerPeer() {
   viewerIceQueue = [];
 }
 
+// Streamer vendo o próprio feed e participando do chat da própria live
+function enterSelfView() {
+  if (!broadcasterStream) {
+    openStudioModal();
+    return;
+  }
+  watchingStreamId = null;
+  isWatchingSelf = true;
+
+  closeViewerPeer();
+
+  remoteVideo.srcObject = broadcasterStream;
+  remoteVideo.muted = true; // evita eco do próprio áudio
+  if (volumeSlider && remoteVideo.volume === 0) remoteVideo.volume = 1;
+  updateMuteUI();
+
+  streamPlaceholder.classList.add('hidden');
+  if (streamTitleEl) {
+    streamTitleEl.textContent = currentBroadcastTitle || 'Minha transmissão';
+  }
+  if (streamerByInfo) {
+    streamerByInfo.innerHTML = `👑 Você está transmitindo · chat ao vivo`;
+  }
+
+  showWatch();
+  remoteVideo.play().catch(() => {});
+  if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
 function stopWatching() {
   if (watchingStreamId) {
     socket.emit('watch-stream', { streamerId: null });
     watchingStreamId = null;
   }
+  isWatchingSelf = false;
   currentStreamMeta = null;
   closeViewerPeer();
   remoteVideo.srcObject = null;
@@ -624,9 +675,10 @@ socket.on('stream-ended', ({ streamerId } = {}) => {
   stopWatching();
 });
 
-// Ao começar a transmitir, sai da live que estiver assistindo
+// Ao começar a transmitir, sai de outra live e entra na própria (com chat)
 socket.on('stream-started-ok', () => {
   if (watchingStreamId) stopWatching();
+  enterSelfView();
 });
 
 
