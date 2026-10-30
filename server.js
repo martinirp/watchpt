@@ -8,21 +8,9 @@ const fs         = require('fs');
 const crypto     = require('crypto');
 
 const app = express();
-
-// ─── Certificados SSL automáticos para HTTPS ────────────────
-let sslOptions = null;
-try {
-  const selfsigned = require('selfsigned');
-  const attrs = [{ name: 'commonName', value: 'watchpt.local' }];
-  const pems = selfsigned.generate(attrs, { days: 365 });
-  sslOptions = { key: pems.private, cert: pems.cert };
-} catch (e) {
-  console.warn('[HTTPS] Módulo selfsigned não disponível, rodando apenas HTTP:', e.message);
-}
-
-// Servidor principal: HTTPS se disponível, senão HTTP
-const server = sslOptions ? https.createServer(sslOptions, app) : http.createServer(app);
-const io     = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
+let server = null;
+let io     = null;
+let sslActive = false;
 
 let PORT = parseInt(process.env.PORT, 10) || 7070;
 
@@ -160,21 +148,19 @@ let streamInfo = {
   startedAt: null
 };
 
-const viewers = new Map();        // socketId -> { id, username }
+function setupSocketIo() {
+  io.on('connection', (socket) => {
+    // Verificar autenticação pelo token no handshake
+    const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+    const session = getSession(token);
 
-// ─── Socket.io ─────────────────────────────────────────────
-io.on('connection', (socket) => {
-  // Verificar autenticação pelo token no handshake
-  const token = socket.handshake.auth?.token || socket.handshake.query?.token;
-  const session = getSession(token);
+    if (!session) {
+      socket.emit('auth-error', 'Sessão inválida ou expirada. Faça login novamente.');
+      socket.disconnect(true);
+      return;
+    }
 
-  if (!session) {
-    socket.emit('auth-error', 'Sessão inválida ou expirada. Faça login novamente.');
-    socket.disconnect(true);
-    return;
-  }
-
-  const { username } = session;
+    const { username } = session;
   console.log(`[Socket] Conectado: ${username} (${socket.id})`);
 
   // ── Entrar como espectador ──────────────────────────────
@@ -327,30 +313,56 @@ io.on('connection', (socket) => {
       io.emit('viewers-list', Array.from(viewers.values()));
     }
   });
-});
-
-// ─── Iniciar servidor com auto-fallback de porta ───────────
-function startServer(portToTry) {
-  server.listen(portToTry, '0.0.0.0', () => {
-    PORT = portToTry;
-    const protocol = sslOptions ? 'https' : 'http';
-    const ips = getLocalIpAddresses();
-    console.log('\n============================================');
-    console.log(`  🚀 WatchPT — Servidor Pronto! (${protocol.toUpperCase()})`);
-    console.log('============================================');
-    console.log(`  🎬 App:  ${protocol}://localhost:${PORT}`);
-    console.log(`  🔗 Rede: ${ips.map(i => `${protocol}://${i.address}:${PORT}`).join(' | ') || 'N/A'}`);
-    console.log('============================================\n');
-  });
-
-  server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE' || err.code === 'EACCES') {
-      console.warn(`Porta ${portToTry} ocupada, tentando ${portToTry + 1}...`);
-      startServer(portToTry + 1);
-    } else {
-      console.error('Erro fatal no servidor:', err);
-    }
-  });
 }
 
-startServer(PORT);
+// ─── Inicialização com Suporte HTTPS e HTTP ─────────────────
+async function initServer() {
+  let sslOptions = null;
+  try {
+    const selfsigned = require('selfsigned');
+    const pems = await selfsigned.generate(
+      [{ name: 'commonName', value: '192.168.3.141' }],
+      { days: 365, keySize: 2048, algorithm: 'sha256' }
+    );
+    sslOptions = {
+      key: pems.private,
+      cert: pems.cert
+    };
+    sslActive = true;
+  } catch (err) {
+    console.warn('[SSL] Aviso: não foi possível gerar SSL nativo. Iniciando em HTTP:', err.message);
+  }
+
+  server = sslOptions ? https.createServer(sslOptions, app) : http.createServer(app);
+  io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
+
+  setupSocketIo();
+
+  function tryListen(portToTry) {
+    server.listen(portToTry, '0.0.0.0', () => {
+      PORT = portToTry;
+      const protocol = sslActive ? 'https' : 'http';
+      const ips = getLocalIpAddresses();
+      console.log('\n============================================');
+      console.log(`  🚀 WatchPT — Servidor Pronto! (${protocol.toUpperCase()})`);
+      console.log('============================================');
+      console.log(`  🎬 App:  ${protocol}://localhost:${PORT}`);
+      console.log(`  🔗 Rede: ${ips.map(i => `${protocol}://${i.address}:${PORT}`).join(' | ') || 'N/A'}`);
+      console.log('============================================\n');
+    });
+
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE' || err.code === 'EACCES') {
+        console.warn(`Porta ${portToTry} ocupada, tentando ${portToTry + 1}...`);
+        tryListen(portToTry + 1);
+      } else {
+        console.error('Erro fatal no servidor:', err);
+      }
+    });
+  }
+
+  tryListen(PORT);
+}
+
+initServer();
+
