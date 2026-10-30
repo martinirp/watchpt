@@ -1,0 +1,20 @@
+{
+  "name": "stream-hub",
+  "version": "1.0.0",
+  "description": "Servidor de transmissão de vídeo e tela local com WebRTC",
+  "main": "start.js",
+  "scripts": {
+    "start": "node start.js",
+    "server": "node server.js"
+  },
+  "pkg": {
+    "assets": [
+      "public/**/*",
+      "data/**/*"
+    ]
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}

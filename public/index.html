@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StreamHub</title>
+  <meta name="description" content="Transmissão de vídeo em tempo real com latência ultra baixa via WebRTC.">
+  <link rel="stylesheet" href="/css/style.css">
+  <script>
+    // Verificação de autenticação imediata
+    (() => {
+      const authTok = localStorage.getItem('sh_token');
+      if (!authTok) {
+        window.location.replace('/login.html');
+      }
+    })();
+  </script>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="app-header">
+    <a href="/" class="brand-container">
+      <div class="brand-logo">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </div>
+      <span class="brand-title">StreamHub</span>
+      <span class="brand-badge">P2P Live</span>
+    </a>
+
+    <div class="header-status">
+      <div id="liveBadge" class="badge-live offline">
+        <span class="pulse-dot"></span>OFFLINE
+      </div>
+      <div class="viewers-counter">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>
+        <span id="viewerCount">0</span>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <!-- Botão para Iniciar Transmissão -->
+      <button id="btnToggleStudio" class="btn-transmit">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>
+        </svg>
+        <span id="transmitBtnText">Iniciar Transmissão</span>
+      </button>
+
+      <!-- Botão Copiar Link da Live -->
+      <button id="btnHeaderShare" class="btn-open-viewer" title="Copiar link para amigos">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+        <span>Link da Live</span>
+      </button>
+
+      <!-- Badge do Usuário Logado -->
+      <div class="user-badge">
+        <div class="user-avatar-circle" id="userInitial">?</div>
+        <span id="headerUsername" style="font-weight:600;">...</span>
+        <button id="btnLogout" class="btn-logout" title="Sair da conta">Sair</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Conteúdo Principal -->
+  <main class="main-wrapper">
+    <!-- Área de Vídeo -->
+    <section class="stream-container">
+      <div class="video-theater">
+        <video id="remoteVideo" playsinline autoplay></video>
+
+        <div id="floatingReactions" class="floating-reactions-canvas"></div>
+
+        <div id="unmuteBanner" style="display:none;">
+          🔊 Clique para ativar o áudio da live
+        </div>
+
+        <div id="streamPlaceholder" class="video-overlay-placeholder">
+          <div class="placeholder-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>
+            </svg>
+          </div>
+          <div id="placeholderTitle" class="placeholder-title">Nenhuma Transmissão ao Vivo</div>
+          <div id="placeholderDesc" class="placeholder-desc">
+            Aguardando alguém iniciar. Você também pode transmitir! Clique no botão <strong>"Iniciar Transmissão"</strong> acima.
+          </div>
+        </div>
+
+        <!-- Controles de Vídeo -->
+        <div class="video-custom-controls">
+          <div class="controls-left">
+            <button id="btnPlayPause" class="ctrl-btn" title="Play / Pause">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+            <div class="volume-slider-wrapper">
+              <button id="btnMute" class="ctrl-btn" title="Mute">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+              </button>
+              <input id="volumeSlider" class="volume-slider" type="range" min="0" max="1" step="0.05" value="1">
+            </div>
+          </div>
+          <div class="controls-right">
+            <button id="btnPip" class="ctrl-btn" title="Picture in Picture">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="10" width="8" height="6" rx="1"/>
+              </svg>
+            </button>
+            <button id="btnFullscreen" class="ctrl-btn" title="Tela Cheia">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Barra de Informações do Stream -->
+      <div class="stream-info-bar">
+        <div class="stream-title-box">
+          <h1 id="streamTitle">Transmissão ao Vivo</h1>
+          <div class="stream-meta">
+            <span id="streamerByInfo">⚡ WebRTC P2P · Latência ultra baixa</span>
+          </div>
+        </div>
+        <div class="reactions-quick-bar">
+          <button class="reaction-btn" data-emoji="🔥">🔥</button>
+          <button class="reaction-btn" data-emoji="❤️">❤️</button>
+          <button class="reaction-btn" data-emoji="👏">👏</button>
+          <button class="reaction-btn" data-emoji="😂">😂</button>
+          <button class="reaction-btn" data-emoji="🚀">🚀</button>
+          <button class="reaction-btn" data-emoji="🍿">🍿</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Painel de Chat -->
+    <aside class="chat-panel">
+      <div class="chat-header">
+        <span class="chat-title">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          Chat ao Vivo
+        </span>
+      </div>
+
+      <div id="chatMessages" class="chat-messages">
+        <div class="chat-bubble">
+          <div class="bubble-meta">
+            <span class="bubble-sender">Sistema</span>
+          </div>
+          <div class="bubble-text">Bem-vindo ao StreamHub! Converse e reaja em tempo real.</div>
+        </div>
+      </div>
+
+      <div class="chat-input-area">
+        <div style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:6px;">
+          <span>Logado como:</span>
+          <strong id="chatUserDisplay" style="color:var(--text-primary);">...</strong>
+        </div>
+        <form id="chatForm" class="chat-form">
+          <input type="text" id="chatInput" class="input-message" placeholder="Escreva uma mensagem..." autocomplete="off">
+          <button type="submit" class="btn-send" title="Enviar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+          </button>
+        </form>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Modal do Estúdio de Transmissão -->
+  <div id="studioModal" class="studio-modal-backdrop">
+    <div class="studio-modal-card">
+      <div class="studio-modal-header">
+        <h2>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>
+          </svg>
+          Estúdio de Transmissão
+        </h2>
+        <button id="btnCloseStudio" class="btn-close-modal" title="Fechar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="studio-modal-body">
+        <!-- Compartilhar link com amigos -->
+        <div class="copy-banner" style="margin:0;">
+          <div class="copy-info">
+            <h3 style="display:flex;align-items:center;gap:6px;">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+              </svg>
+              Link para seus amigos assistirem
+            </h3>
+            <p>Envie este link para qualquer pessoa na sua rede local:</p>
+          </div>
+          <div class="copy-action-box">
+            <code id="modalShareableUrlCode">Carregando...</code>
+            <button id="btnModalCopyLink" class="btn-copy">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+              Copiar
+            </button>
+          </div>
+        </div>
+
+        <!-- Seletor de fonte de mídia -->
+        <div>
+          <label class="auth-label" style="display:block;margin-bottom:8px;">1. Escolha o que transmitir:</label>
+          <div class="source-selectors">
+            <div id="btnStudioScreen" class="source-btn active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+              </svg>
+              <span>Tela / Janela</span>
+              <small>Áudio do sistema + tela</small>
+            </div>
+            <div id="btnStudioVideo" class="source-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>
+              </svg>
+              <span>Arquivo de Vídeo</span>
+              <small>MP4, MKV, WebM</small>
+            </div>
+            <div id="btnStudioCamera" class="source-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>
+              </svg>
+              <span>Câmera</span>
+              <small>Webcam ao vivo</small>
+            </div>
+          </div>
+        </div>
+
+        <!-- Arquivo de vídeo local (quando modo Arquivo estiver ativo) -->
+        <div id="studioFileInputWrapper" class="file-input-wrapper">
+          <label>Selecione um arquivo de vídeo do seu computador:</label>
+          <input type="file" id="studioVideoFileInput" accept="video/mp4,video/webm,video/ogg,video/x-matroska,.mkv">
+        </div>
+
+        <!-- Título do Stream -->
+        <div class="stream-title-field">
+          <label>2. Título da sua transmissão</label>
+          <input type="text" id="studioTitleInput" class="input-message" style="width:100%" placeholder="Ex: Assistindo filme com a galera" value="Transmissão ao Vivo">
+        </div>
+
+        <!-- Monitor de Prévia do Streamer -->
+        <div id="studioPreviewBox" style="display:none;background:#000;border:1px solid var(--border-sm);border-radius:10px;overflow:hidden;position:relative;">
+          <video id="studioPreviewVideo" autoplay playsinline muted style="width:100%;max-height:220px;object-fit:contain;display:block;"></video>
+          <div style="position:absolute;top:8px;left:8px;background:rgba(0,0,0,0.7);padding:3px 8px;border-radius:4px;font-size:11px;font-weight:700;color:#fff;">
+            Prévia local (seu feed)
+          </div>
+        </div>
+
+        <!-- Botão principal Iniciar/Parar -->
+        <div class="host-main-actions">
+          <button id="btnStudioStart" class="btn-primary-action">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
+            Começar a Transmitir
+          </button>
+          <button id="btnStudioStop" class="btn-primary-action btn-stop-action" style="display:none;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12"/></svg>
+            Encerrar Transmissão
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/common.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

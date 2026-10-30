@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StreamHub Studio</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+  <header class="app-header">
+    <a href="/host" class="brand-container">
+      <div class="brand-logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/>
+        </svg>
+      </div>
+      <span class="brand-title">StreamHub</span>
+      <span class="brand-badge">Studio</span>
+    </a>
+
+    <div class="header-status">
+      <div id="hostStatusBadge" class="badge-live offline">
+        <span class="pulse-dot"></span>OFFLINE
+      </div>
+      <div class="viewers-counter">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>
+        <span id="viewerCount">0</span>&nbsp;assistindo
+      </div>
+      <a href="/" target="_blank" class="btn-open-viewer">
+        Ver como espectador ↗
+      </a>
+    </div>
+  </header>
+
+  <div class="host-dashboard">
+
+    <!-- Link de Compartilhamento -->
+    <div class="copy-banner">
+      <div class="copy-info">
+        <h3>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+          </svg>
+          Link para seus amigos
+        </h3>
+        <p>Compartilhe com quem estiver na mesma rede. Para acesso externo, use <code style="font-family:var(--mono);font-size:11px;color:var(--text-secondary)">npx localtunnel --port 7070</code></p>
+      </div>
+      <div class="copy-action-box">
+        <code id="shareableUrlCode">Carregando...</code>
+        <button id="copyLinkBtn" class="btn-copy">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          Copiar
+        </button>
+      </div>
+    </div>
+
+    <div class="host-grid">
+      <!-- Coluna Esquerda -->
+      <div style="display:flex;flex-direction:column;gap:16px;">
+
+        <!-- Configuração de mídia -->
+        <div class="host-card">
+          <div class="host-card-title">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>
+            </svg>
+            Fonte de Transmissão
+          </div>
+
+          <div class="source-selectors">
+            <div id="btnScreenSource" class="source-btn active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+              </svg>
+              <span>Tela / Janela</span>
+              <small>Jogos, apps, abas</small>
+            </div>
+            <div id="btnVideoSource" class="source-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>
+              </svg>
+              <span>Arquivo</span>
+              <small>MP4, MKV, WebM</small>
+            </div>
+            <div id="btnCameraSource" class="source-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>
+              </svg>
+              <span>Câmera</span>
+              <small>Webcam ao vivo</small>
+            </div>
+          </div>
+
+          <!-- Arquivo de vídeo -->
+          <div id="fileInputWrapper" class="file-input-wrapper">
+            <label>Selecionar arquivo:</label>
+            <input type="file" id="videoFileInput" accept="video/mp4,video/webm,video/ogg,video/x-matroska,.mkv">
+          </div>
+
+          <!-- Título -->
+          <div class="stream-title-field">
+            <label>Título da transmissão</label>
+            <input type="text" id="streamTitleInput" class="input-message" style="width:100%" placeholder="Ex: Assistindo com a galera" value="Transmissão ao Vivo">
+          </div>
+
+          <!-- Botões de ação -->
+          <div class="host-main-actions">
+            <button id="btnStartStream" class="btn-primary-action">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
+              Iniciar Transmissão
+            </button>
+            <button id="btnStopStream" class="btn-primary-action btn-stop-action" style="display:none;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12"/></svg>
+              Parar
+            </button>
+          </div>
+        </div>
+
+        <!-- Monitor de prévia -->
+        <div class="host-card">
+          <div class="host-monitor-header">
+            <div class="host-card-title" style="margin-bottom:0;">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="2"/>
+                <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"/>
+              </svg>
+              Prévia
+            </div>
+            <span id="resolutionBadge" class="resolution-pill">Sem sinal</span>
+          </div>
+
+          <div class="video-theater" style="margin-top:12px;max-height:340px;">
+            <video id="localPreview" playsinline autoplay muted style="width:100%;height:100%;object-fit:contain;"></video>
+            <video id="localVideoElement" controls playsinline loop style="width:100%;height:100%;object-fit:contain;display:none;"></video>
+            <div id="floatingReactions" class="floating-reactions-canvas"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Coluna Direita -->
+      <div style="display:flex;flex-direction:column;gap:16px;">
+
+        <!-- Espectadores -->
+        <div class="host-card">
+          <div class="host-card-title">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+            Espectadores Conectados
+          </div>
+          <div id="viewersList" class="viewers-list">
+            <p class="viewers-empty-msg">Nenhum espectador ainda. Compartilhe o link acima!</p>
+          </div>
+        </div>
+
+        <!-- Chat -->
+        <div class="host-card" style="display:flex;flex-direction:column;height:440px;padding:0;overflow:hidden;">
+          <div class="chat-header">
+            <span class="chat-title">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+              </svg>
+              Chat
+            </span>
+          </div>
+          <div id="chatMessages" class="chat-messages" style="flex:1;"></div>
+          <div class="chat-input-area">
+            <form id="chatForm" class="chat-form">
+              <input type="text" id="chatInput" class="input-message" placeholder="Responder como HOST..." autocomplete="off">
+              <button type="submit" class="btn-send">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/common.js"></script>
+  <script src="/js/host.js"></script>
+</body>
+</html>

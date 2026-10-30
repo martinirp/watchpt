@@ -1,0 +1,16 @@
+[Unit]
+Description=StreamHub Video Streaming Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/video-stream-hub
+ExecStart=/usr/bin/node /var/www/video-stream-hub/server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+Environment=PORT=7070
+
+[Install]
+WantedBy=multi-user.target
