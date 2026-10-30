@@ -1,13 +1,27 @@
 const express    = require('express');
 const http       = require('http');
+const https      = require('https');
 const { Server } = require('socket.io');
 const os         = require('os');
 const path       = require('path');
 const fs         = require('fs');
 const crypto     = require('crypto');
 
-const app    = express();
-const server = http.createServer(app);
+const app = express();
+
+// ─── Certificados SSL automáticos para HTTPS ────────────────
+let sslOptions = null;
+try {
+  const selfsigned = require('selfsigned');
+  const attrs = [{ name: 'commonName', value: 'watchpt.local' }];
+  const pems = selfsigned.generate(attrs, { days: 365 });
+  sslOptions = { key: pems.private, cert: pems.cert };
+} catch (e) {
+  console.warn('[HTTPS] Módulo selfsigned não disponível, rodando apenas HTTP:', e.message);
+}
+
+// Servidor principal: HTTPS se disponível, senão HTTP
+const server = sslOptions ? https.createServer(sslOptions, app) : http.createServer(app);
 const io     = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
 
 let PORT = parseInt(process.env.PORT, 10) || 7070;
@@ -319,12 +333,13 @@ io.on('connection', (socket) => {
 function startServer(portToTry) {
   server.listen(portToTry, '0.0.0.0', () => {
     PORT = portToTry;
+    const protocol = sslOptions ? 'https' : 'http';
     const ips = getLocalIpAddresses();
     console.log('\n============================================');
-    console.log('  🚀 StreamHub — Servidor Pronto!');
+    console.log(`  🚀 WatchPT — Servidor Pronto! (${protocol.toUpperCase()})`);
     console.log('============================================');
-    console.log(`  🎬 App:  http://localhost:${PORT}`);
-    console.log(`  🔗 Rede: ${ips.map(i => `http://${i.address}:${PORT}`).join(' | ') || 'N/A'}`);
+    console.log(`  🎬 App:  ${protocol}://localhost:${PORT}`);
+    console.log(`  🔗 Rede: ${ips.map(i => `${protocol}://${i.address}:${PORT}`).join(' | ') || 'N/A'}`);
     console.log('============================================\n');
   });
 
