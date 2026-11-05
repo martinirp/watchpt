@@ -322,6 +322,75 @@ body {
   line-height: 1.6;
 }
 
+/* ─── HUD de Diagnóstico WebRTC ──────────────── */
+.webrtc-hud {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 25;
+  background: rgba(10, 14, 23, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--r-md);
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #e6edf3;
+  width: 320px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.65);
+  pointer-events: auto;
+  transition: all var(--t-fast);
+}
+.webrtc-hud.minimized .hud-body {
+  display: none;
+}
+.webrtc-hud.is-hidden {
+  display: none;
+}
+.hud-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-weight: 700;
+  font-size: 11px;
+  color: #58a6ff;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  padding-bottom: 6px;
+}
+.hud-btn {
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.2);
+  color: #fff;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.hud-btn:hover {
+  background: rgba(255,255,255,0.25);
+}
+.hud-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+.hud-row span {
+  color: #8b949e;
+}
+.hud-alert {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(255, 82, 82, 0.2);
+  border: 1px solid #ff5252;
+  border-radius: 4px;
+  color: #ff6b6b;
+  font-size: 10px;
+  word-break: break-word;
+}
+
 /* ─── Controles de Vídeo ─────────────────────── */
 .video-custom-controls {
   position: absolute;

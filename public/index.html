@@ -97,6 +97,29 @@
       <div class="video-theater">
         <video id="remoteVideo" playsinline autoplay muted></video>
 
+        <!-- HUD de Diagnóstico WebRTC em Tempo Real -->
+        <div id="webrtcHud" class="webrtc-hud">
+          <div class="hud-header">
+            <span>📡 Diagnóstico WebRTC</span>
+            <div style="display:flex;gap:6px;">
+              <button id="btnCopyDiag" type="button" class="hud-btn" title="Copiar diagnóstico para colar no chat">Copiar Relatório</button>
+              <button id="btnToggleHud" type="button" class="hud-btn">Minimizar</button>
+            </div>
+          </div>
+          <div id="hudBody" class="hud-body">
+            <div class="hud-row"><span>Sinalização:</span> <strong id="hudSocket">Conectando...</strong></div>
+            <div class="hud-row"><span>Conexão P2P (Peer):</span> <strong id="hudPeer">Iniciando...</strong></div>
+            <div class="hud-row"><span>Rede (ICE):</span> <strong id="hudIce">Aguardando...</strong></div>
+            <div class="hud-row"><span>IP Conectado:</span> <strong id="hudPeerIp">-</strong></div>
+            <div class="hud-row"><span>Codec:</span> <strong id="hudCodec">-</strong></div>
+            <div class="hud-row"><span>Dados Recebidos:</span> <strong id="hudBytes">0 KB</strong> (<span id="hudBitrate">0 kbps</span>)</div>
+            <div class="hud-row"><span>Frames Decodificados:</span> <strong id="hudFrames">0</strong></div>
+            <div class="hud-row"><span>Resolução:</span> <strong id="hudRes">0x0</strong></div>
+            <div class="hud-row"><span>Status Vídeo:</span> <strong id="hudVideoState">-</strong></div>
+            <div class="hud-row hud-alert" id="hudAlertRow" style="display:none;"><strong id="hudAlertText"></strong></div>
+          </div>
+        </div>
+
         <div id="floatingReactions" class="floating-reactions-canvas"></div>
 
         <div id="unmuteBanner" style="display:none;">
@@ -129,6 +152,7 @@
             </div>
           </div>
           <div class="controls-right">
+            <button id="btnOpenHud" class="ctrl-btn" title="Diagnóstico WebRTC" type="button" style="font-size:11px;font-weight:700;font-family:var(--mono);padding:0 6px;">HUD</button>
             <button id="btnPip" class="ctrl-btn" title="Picture in Picture">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="10" width="8" height="6" rx="1"/>

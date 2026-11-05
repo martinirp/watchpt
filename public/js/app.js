@@ -538,6 +538,7 @@ function startWatching(stream) {
   placeholderDesc.textContent = 'Aguarde enquanto a transmissão é estabelecida.';
 
   showWatch();
+  startHud();
   socket.emit('watch-stream', { streamerId: stream.id });
 
   setTimeout(() => {
@@ -557,6 +558,7 @@ function closeViewerPeer() {
 
 // Streamer vendo o próprio feed e participando do chat da própria live
 function enterSelfView() {
+  stopHud();
   if (!broadcasterStream) {
     openStudioModal();
     return;
@@ -585,6 +587,7 @@ function enterSelfView() {
 }
 
 function stopWatching() {
+  stopHud();
   if (watchingStreamId) {
     socket.emit('watch-stream', { streamerId: null });
     watchingStreamId = null;
@@ -915,4 +918,183 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+// ============================================================
+// 13. HUD de Diagnóstico WebRTC em Tempo Real
+// ============================================================
+let hudInterval = null;
+let lastBytes = 0;
+let lastTimestamp = Date.now();
+let lastStatsData = {};
+
+const webrtcHud = document.getElementById('webrtcHud');
+const btnToggleHud = document.getElementById('btnToggleHud');
+const btnOpenHud = document.getElementById('btnOpenHud');
+const btnCopyDiag = document.getElementById('btnCopyDiag');
+
+if (btnToggleHud && webrtcHud) {
+  btnToggleHud.addEventListener('click', () => {
+    webrtcHud.classList.toggle('minimized');
+    btnToggleHud.textContent = webrtcHud.classList.contains('minimized') ? 'Expandir' : 'Minimizar';
+  });
+}
+
+if (btnOpenHud && webrtcHud) {
+  btnOpenHud.addEventListener('click', () => {
+    webrtcHud.classList.toggle('is-hidden');
+  });
+}
+
+if (btnCopyDiag) {
+  btnCopyDiag.addEventListener('click', () => {
+    const reportText = JSON.stringify(lastStatsData, null, 2);
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(reportText).then(() => {
+        showToast('Relatório WebRTC copiado para a área de transferência!', 'success');
+      }).catch(() => {
+        prompt('Copie o relatório WebRTC:', reportText);
+      });
+    } else {
+      prompt('Copie o relatório WebRTC:', reportText);
+    }
+  });
+}
+
+function startHud() {
+  if (webrtcHud) webrtcHud.classList.remove('is-hidden');
+  if (hudInterval) clearInterval(hudInterval);
+  lastBytes = 0;
+  lastTimestamp = Date.now();
+  updateHud();
+  hudInterval = setInterval(updateHud, 1000);
+}
+
+function stopHud() {
+  if (hudInterval) clearInterval(hudInterval);
+  hudInterval = null;
+  if (webrtcHud) webrtcHud.classList.add('is-hidden');
+}
+
+async function updateHud() {
+  const hudSocket = document.getElementById('hudSocket');
+  const hudPeer = document.getElementById('hudPeer');
+  const hudIce = document.getElementById('hudIce');
+  const hudPeerIp = document.getElementById('hudPeerIp');
+  const hudCodec = document.getElementById('hudCodec');
+  const hudBytes = document.getElementById('hudBytes');
+  const hudBitrate = document.getElementById('hudBitrate');
+  const hudFrames = document.getElementById('hudFrames');
+  const hudRes = document.getElementById('hudRes');
+  const hudVideoState = document.getElementById('hudVideoState');
+  const hudAlertRow = document.getElementById('hudAlertRow');
+  const hudAlertText = document.getElementById('hudAlertText');
+
+  if (!hudSocket) return;
+
+  hudSocket.textContent = socket && socket.connected ? `Conectado (${socket.id?.substring(0, 5)})` : 'Desconectado';
+
+  if (!viewerPeerConn) {
+    if (hudPeer) { hudPeer.textContent = 'Aguardando oferta...'; hudPeer.style.color = '#8b949e'; }
+    if (hudIce) { hudIce.textContent = 'Aguardando...'; hudIce.style.color = '#8b949e'; }
+    if (hudAlertRow) hudAlertRow.style.display = 'none';
+    return;
+  }
+
+  const peerState = viewerPeerConn.connectionState || 'new';
+  const iceState = viewerPeerConn.iceConnectionState || 'new';
+
+  if (hudPeer) {
+    hudPeer.textContent = peerState;
+    hudPeer.style.color = (peerState === 'connected') ? '#51cf66' : (peerState === 'failed' ? '#ff6b6b' : '#fcc419');
+  }
+
+  if (hudIce) {
+    hudIce.textContent = iceState;
+    hudIce.style.color = (iceState === 'connected' || iceState === 'completed') ? '#51cf66' : (iceState === 'failed' ? '#ff6b6b' : '#fcc419');
+  }
+
+  if (iceState === 'failed') {
+    if (hudAlertRow) hudAlertRow.style.display = 'block';
+    if (hudAlertText) hudAlertText.textContent = '⚠️ ICE FAILED: Bloqueio de rede UDP P2P (verifique firewall do Linux Mint ou isolamento de Wi-Fi).';
+  } else if (iceState === 'checking') {
+    if (hudAlertRow) hudAlertRow.style.display = 'block';
+    if (hudAlertText) hudAlertText.textContent = '⏳ Testando portas e rotas locais (ICE checking)...';
+  } else if (iceState === 'disconnected') {
+    if (hudAlertRow) hudAlertRow.style.display = 'block';
+    if (hudAlertText) hudAlertText.textContent = '⚠️ Conexão P2P instável ou interrompida.';
+  } else {
+    if (hudAlertRow) hudAlertRow.style.display = 'none';
+  }
+
+  try {
+    const stats = await viewerPeerConn.getStats();
+    let bytes = 0;
+    let frames = 0;
+    let codec = '-';
+    let peerIp = '-';
+
+    stats.forEach(report => {
+      if (report.type === 'inbound-rtp' && report.kind === 'video') {
+        bytes = report.bytesReceived || 0;
+        frames = report.framesDecoded || 0;
+        if (report.codecId) {
+          const c = stats.get(report.codecId);
+          if (c) codec = (c.mimeType || c.payloadType || '').replace('video/', '');
+        }
+      }
+      if (report.type === 'candidate-pair' && (report.state === 'succeeded' || report.nominated)) {
+        const remoteCand = stats.get(report.remoteCandidateId);
+        if (remoteCand) {
+          peerIp = `${remoteCand.address || remoteCand.ip}:${remoteCand.port} (${remoteCand.candidateType})`;
+        }
+      }
+    });
+
+    const now = Date.now();
+    const dt = (now - lastTimestamp) / 1000;
+    const bitrate = dt > 0 ? Math.round(((bytes - lastBytes) * 8) / dt / 1000) : 0;
+    lastBytes = bytes;
+    lastTimestamp = now;
+
+    if (hudBytes) hudBytes.textContent = (bytes > 1048576) ? (bytes / 1048576).toFixed(2) + ' MB' : Math.round(bytes / 1024) + ' KB';
+    if (hudBitrate) hudBitrate.textContent = Math.max(0, bitrate) + ' kbps';
+    if (hudFrames) hudFrames.textContent = frames;
+    if (hudCodec) hudCodec.textContent = codec;
+    if (hudPeerIp) hudPeerIp.textContent = peerIp;
+    if (hudRes) hudRes.textContent = `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`;
+
+    if (hudVideoState) {
+      if (remoteVideo.videoWidth > 0 && !remoteVideo.paused && frames > 0) {
+        hudVideoState.textContent = 'Reproduzindo';
+        hudVideoState.style.color = '#51cf66';
+      } else if (remoteVideo.paused) {
+        hudVideoState.textContent = 'Pausado';
+        hudVideoState.style.color = '#ff6b6b';
+      } else if (bytes > 0 && frames === 0) {
+        hudVideoState.textContent = 'Aguardando Keyframe';
+        hudVideoState.style.color = '#fcc419';
+      } else {
+        hudVideoState.textContent = 'Aguardando fluxo...';
+        hudVideoState.style.color = '#8b949e';
+      }
+    }
+
+    lastStatsData = {
+      streamId: watchingStreamId,
+      peerState,
+      iceState,
+      peerIp,
+      codec,
+      bytesReceived: bytes,
+      bitrateKbps: bitrate,
+      framesDecoded: frames,
+      resolution: `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`,
+      videoPaused: remoteVideo.paused,
+      videoMuted: remoteVideo.muted
+    };
+
+  } catch (e) {
+    console.warn('[HUD] getStats aviso:', e.message);
+  }
 }
