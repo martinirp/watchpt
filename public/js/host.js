@@ -22,6 +22,75 @@ const pendingViewers = new Map(); // viewerId -> username (viewers esperando str
 let streamStartTime = null;
 let statsInterval = null;
 
+// ─── Transmissão Híbrida: WebSocket Relay Garantido (Host) ───
+let broadcasterRelayRecorder = null;
+let broadcasterRelayMime = null;
+let lastRecorderRestart = 0;
+
+function startBroadcasterRelay(stream) {
+  stopBroadcasterRelay();
+  if (!stream) return;
+  const hasAudio = stream.getAudioTracks().length > 0;
+  broadcasterRelayMime = typeof getOptimalMediaMimeType === 'function' 
+    ? getOptimalMediaMimeType(hasAudio) 
+    : (hasAudio ? 'video/webm; codecs="vp8,opus"' : 'video/webm; codecs="vp8"');
+
+  try {
+    broadcasterRelayRecorder = new MediaRecorder(stream, {
+      mimeType: broadcasterRelayMime,
+      videoBitsPerSecond: 2500000
+    });
+    let isFirst = true;
+
+    broadcasterRelayRecorder.ondataavailable = async (e) => {
+      if (!currentStream || !e.data || e.data.size === 0) return;
+      try {
+        const buffer = await e.data.arrayBuffer();
+        if (isFirst) {
+          isFirst = false;
+          socket.emit('relay-init', { mimeType: broadcasterRelayMime, chunk: buffer });
+        } else {
+          socket.emit('relay-chunk', buffer);
+        }
+      } catch (err) {
+        console.warn('[Relay Host] Erro ao enviar buffer:', err);
+      }
+    };
+
+    broadcasterRelayRecorder.start(180);
+    console.log(`[Relay Host] Gravador ativado com sucesso: ${broadcasterRelayMime}`);
+  } catch (err) {
+    console.warn('[Relay Host] Falha ao iniciar MediaRecorder:', err);
+  }
+}
+
+function stopBroadcasterRelay() {
+  if (broadcasterRelayRecorder) {
+    try {
+      if (broadcasterRelayRecorder.state !== 'inactive') {
+        broadcasterRelayRecorder.stop();
+      }
+    } catch (e) {}
+    broadcasterRelayRecorder = null;
+  }
+}
+
+function restartRelayRecorderForNewViewer() {
+  if (!broadcasterRelayRecorder || broadcasterRelayRecorder.state !== 'recording') return;
+  const now = Date.now();
+  if (now - lastRecorderRestart < 1500) return;
+  lastRecorderRestart = now;
+  console.log('[Relay Host] Gerando novo Keyframe e Header limpo para espectador...');
+  stopBroadcasterRelay();
+  if (currentStream) {
+    startBroadcasterRelay(currentStream);
+  }
+}
+
+socket.on('request-keyframe', () => {
+  restartRelayRecorderForNewViewer();
+});
+
 // Elementos DOM
 const localPreview = document.getElementById('localPreview');
 const localVideoElement = document.getElementById('localVideoElement');
@@ -187,6 +256,9 @@ btnStartStream.addEventListener('click', async () => {
       type: currentSourceType
     });
 
+    // Iniciar gravação e streaming contínuo em tempo real via WebSocket Relay Garantido
+    startBroadcasterRelay(currentStream);
+
     showToast('Transmissão iniciada com sucesso!', 'live');
 
     // Conectar viewers que estavam esperando (pendingViewers)
@@ -215,6 +287,7 @@ btnStopStream.addEventListener('click', () => {
 });
 
 function stopStreaming() {
+  stopBroadcasterRelay();
   if (currentStream) {
     currentStream.getTracks().forEach(track => track.stop());
     currentStream = null;
@@ -249,6 +322,9 @@ socket.on('viewer-joined', async ({ viewerId, username }) => {
   console.log(`[Host] Espectador entrou: ${username} (${viewerId})`);
   addViewerToUI(viewerId, username);
   showToast(`${username} entrou na transmissão!`, 'info');
+
+  // Gerar um Keyframe limpo para o novo espectador que estiver no modo Relay
+  restartRelayRecorderForNewViewer();
 
   if (currentStream) {
     // Stream já está ativo — conectar imediatamente

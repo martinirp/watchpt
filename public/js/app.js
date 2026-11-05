@@ -130,10 +130,16 @@ let webrtcFallbackTimer = null;
 let broadcasterRelayRecorder = null;
 let broadcasterRelayMime = null;
 let broadcasterFirstChunk = null;
+let lastRecorderRestart = 0;
 
 function startBroadcasterRelay(stream) {
   stopBroadcasterRelay();
-  broadcasterRelayMime = typeof getOptimalMediaMimeType === 'function' ? getOptimalMediaMimeType() : 'video/webm; codecs="vp8,opus"';
+  if (!stream) return;
+  const hasAudio = stream.getAudioTracks().length > 0;
+  broadcasterRelayMime = typeof getOptimalMediaMimeType === 'function' 
+    ? getOptimalMediaMimeType(hasAudio) 
+    : (hasAudio ? 'video/webm; codecs="vp8,opus"' : 'video/webm; codecs="vp8"');
+
   try {
     broadcasterRelayRecorder = new MediaRecorder(stream, {
       mimeType: broadcasterRelayMime,
@@ -174,6 +180,18 @@ function stopBroadcasterRelay() {
     broadcasterRelayRecorder = null;
   }
   broadcasterFirstChunk = null;
+}
+
+function restartBroadcasterRelayKeyframe() {
+  if (!broadcasterRelayRecorder || broadcasterRelayRecorder.state !== 'recording') return;
+  const now = Date.now();
+  if (now - lastRecorderRestart < 1500) return;
+  lastRecorderRestart = now;
+  console.log('[Relay Host] Reiniciando recorder para fornecer Keyframe limpo ao novo espectador...');
+  stopBroadcasterRelay();
+  if (broadcasterStream) {
+    startBroadcasterRelay(broadcasterStream);
+  }
 }
 
 // 4. Controle do Modal do Estúdio
@@ -381,6 +399,9 @@ socket.on('viewer-joined', async ({ viewerId, username: vUser }) => {
   if (!isBroadcaster || !broadcasterStream) return;
   console.log(`[Broadcaster] Novo espectador: ${vUser} (${viewerId}). Criando PeerConnection...`);
 
+  // Emite um Keyframe limpo no Relay WebSocket caso o novo espectador esteja em modo Relay
+  restartBroadcasterRelayKeyframe();
+
   // Se já tinha conexão com esse viewer, fechar
   if (broadcasterPeers.has(viewerId)) {
     try { broadcasterPeers.get(viewerId).close(); } catch(e){}
@@ -499,11 +520,7 @@ socket.on('streamer-conflict', ({ message }) => {
 
 // Solicitação de keyframe do relay para o streamer
 socket.on('request-keyframe', () => {
-  if (broadcasterRelayRecorder && broadcasterRelayRecorder.state === 'recording') {
-    try {
-      broadcasterRelayRecorder.requestData();
-    } catch(e){}
-  }
+  restartBroadcasterRelayKeyframe();
 });
 
 // ============================================================
@@ -619,26 +636,49 @@ function startRelayPlayback(mimeType, initChunk) {
   ms.addEventListener('sourceopen', () => {
     if (relayMediaSource !== ms) return;
     try {
-      const mime = (mimeType && MediaSource.isTypeSupported(mimeType)) ? mimeType : (typeof getOptimalMediaMimeType === 'function' ? getOptimalMediaMimeType() : 'video/webm; codecs="vp8,opus"');
+      const mime = (mimeType && MediaSource.isTypeSupported(mimeType)) 
+        ? mimeType 
+        : (typeof getOptimalMediaMimeType === 'function' ? getOptimalMediaMimeType(false) : 'video/webm; codecs="vp8"');
       relayCurrentMime = mime;
       const sb = ms.addSourceBuffer(mime);
-      sb.mode = 'sequence'; // Modo contínuo em tempo real sem saltos
+      // sb.mode permanece 'segments' (WebM no Chromium/Firefox não suporta 'sequence' e lança DOMException)
       relaySourceBuffer = sb;
 
       sb.addEventListener('updateend', () => {
         relayAppending = false;
         if (sb.buffered.length > 0) {
-          const end = sb.buffered.end(sb.buffered.length - 1);
-          const diff = end - remoteVideo.currentTime;
-          // Se o vídeo estiver atrasado mais de 1.2s, cola no live edge
-          if (diff > 1.2 && !remoteVideo.paused) {
-            remoteVideo.currentTime = end - 0.2;
+          const rangeCount = sb.buffered.length;
+          const end = sb.buffered.end(rangeCount - 1);
+          const start = sb.buffered.start(rangeCount - 1);
+
+          // Pula gaps de conexão ou cola na ponta ao vivo (live edge)
+          if (!remoteVideo.seeking) {
+            if (remoteVideo.currentTime < start || (end - remoteVideo.currentTime > 0.8)) {
+              remoteVideo.currentTime = Math.max(start, end - 0.15);
+            }
           }
-          // Limpeza periódica do buffer para não sobrecarregar RAM
-          const start = sb.buffered.start(0);
+
+          // Inicia reprodução assim que o primeiro pedaço de vídeo estiver no buffer
+          if (remoteVideo.paused) {
+            const playPromise = remoteVideo.play();
+            if (playPromise !== undefined) {
+              playPromise.then(() => {
+                if (streamPlaceholder) streamPlaceholder.classList.add('hidden');
+                if (liveBadge) {
+                  liveBadge.classList.remove('offline');
+                  liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
+                }
+              }).catch(() => {
+                if (unmuteBanner) unmuteBanner.style.display = 'flex';
+              });
+            }
+          }
+
+          // Limpeza do início do buffer para poupar RAM
+          const overallStart = sb.buffered.start(0);
           const trim = remoteVideo.currentTime - 10;
-          if (trim > start + 5 && !sb.updating) {
-            try { sb.remove(start, trim); return; } catch(e){}
+          if (trim > overallStart + 5 && !sb.updating) {
+            try { sb.remove(overallStart, trim); return; } catch(e){}
           }
         }
         pumpRelayQueue();
@@ -658,14 +698,9 @@ function startRelayPlayback(mimeType, initChunk) {
     }
   }, { once: true });
 
+  // Iniciar mutado para garantir aprovação da política de autoplay dos navegadores
   remoteVideo.muted = true;
-  remoteVideo.play().then(() => {
-    remoteVideo.muted = false;
-    updateMuteUI();
-  }).catch(() => {
-    updateMuteUI();
-    if (unmuteBanner) unmuteBanner.style.display = 'flex';
-  });
+  updateMuteUI();
 }
 
 function stopRelayPlayback() {
@@ -695,10 +730,8 @@ function pumpRelayQueue() {
   relayAppending = true;
   try {
     relaySourceBuffer.appendBuffer(chunk);
-    if (streamPlaceholder) streamPlaceholder.classList.add('hidden');
-    if (liveBadge) {
-      liveBadge.classList.remove('offline');
-      liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
+    if (streamPlaceholder && remoteVideo.currentTime > 0) {
+      streamPlaceholder.classList.add('hidden');
     }
   } catch (err) {
     relayAppending = false;
@@ -706,11 +739,12 @@ function pumpRelayQueue() {
       try {
         const start = relaySourceBuffer.buffered.start(0);
         const trim = remoteVideo.currentTime - 4;
-        if (trim > start) relaySourceBuffer.remove(start, trim);
+        if (trim > start && !relaySourceBuffer.updating) relaySourceBuffer.remove(start, trim);
       } catch(e){}
     } else {
       console.warn('[Relay MSE] appendBuffer:', err);
     }
+    setTimeout(pumpRelayQueue, 40);
   }
 }
 
@@ -1064,13 +1098,29 @@ if (remoteVideo) {
   remoteVideo.addEventListener('playing', () => {
     console.log('[Viewer] Vídeo está rodando ativamente.');
     streamPlaceholder.classList.add('hidden');
+    if (liveBadge) {
+      liveBadge.classList.remove('offline');
+      liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
+    }
+  });
+
+  remoteVideo.addEventListener('waiting', () => {
+    if (relayActive && relaySourceBuffer && relaySourceBuffer.buffered.length > 0 && !remoteVideo.seeking) {
+      const lastRange = relaySourceBuffer.buffered.length - 1;
+      const end = relaySourceBuffer.buffered.end(lastRange);
+      const start = relaySourceBuffer.buffered.start(lastRange);
+      if (remoteVideo.currentTime < start || (end - remoteVideo.currentTime > 0.8)) {
+        remoteVideo.currentTime = Math.max(start, end - 0.15);
+        remoteVideo.play().catch(() => {});
+      }
+    }
   });
 }
 
 // Controles do reprodutor de vídeo
 if (btnPlayPause) {
   btnPlayPause.addEventListener('click', () => {
-    if (!remoteVideo.srcObject) return;
+    if (!remoteVideo.srcObject && !remoteVideo.src) return;
     if (remoteVideo.paused) {
       remoteVideo.play();
       btnPlayPause.innerHTML = ICON_PAUSE;

@@ -287,6 +287,8 @@ function setupSocketIo() {
         chunk: relayData.chunk
       });
     }
+    // Notifica o streamer para gerar um keyframe inicial caso este espectador use modo Relay
+    io.to(streamerId).emit('request-keyframe');
   });
 
   // Permitir que o espectador peça oferta caso ainda não tenha recebido
@@ -411,6 +413,9 @@ function setupSocketIo() {
         mimeType: relayData.mimeType,
         chunk: relayData.chunk
       });
+    } else {
+      // Se ainda não temos o cabeçalho salvo, solicita ao streamer para gerar
+      io.to(target).emit('request-keyframe');
     }
   });
 

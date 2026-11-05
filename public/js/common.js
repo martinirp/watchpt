@@ -10,11 +10,16 @@ const RTC_CONFIG = {
 };
 
 // Detecta o melhor MIME type suportado pelo navegador para MediaRecorder e MediaSource (MSE)
-function getOptimalMediaMimeType() {
-  const candidates = [
+// Permite especificar se a transmissão possui áudio (se false, omite opus para não bloquear o MSE)
+function getOptimalMediaMimeType(hasAudio = true) {
+  const candidates = hasAudio ? [
     'video/webm; codecs="vp8,opus"',
     'video/webm; codecs="vp8"',
     'video/webm; codecs="vp9,opus"',
+    'video/webm; codecs="vp9"',
+    'video/webm'
+  ] : [
+    'video/webm; codecs="vp8"',
     'video/webm; codecs="vp9"',
     'video/webm'
   ];
