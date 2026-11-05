@@ -7,6 +7,73 @@ const RTC_CONFIG = {
   ]
 };
 
+// ─── Otimizações WebRTC e Codecs ─────────────────────────────
+
+// Configura prioridade de codecs no PeerConnection (prioriza VP8 para evitar tela preta no Linux/Windows/Android)
+function configurePeerVideoCapabilities(pc) {
+  try {
+    if (typeof RTCRtpSender.getCapabilities === 'function') {
+      const caps = RTCRtpSender.getCapabilities('video');
+      if (caps && caps.codecs) {
+        const vp8Codecs = caps.codecs.filter(c => c.mimeType.toLowerCase() === 'video/vp8');
+        const otherCodecs = caps.codecs.filter(c => c.mimeType.toLowerCase() !== 'video/vp8');
+        const preferred = [...vp8Codecs, ...otherCodecs];
+        pc.getTransceivers().forEach(tr => {
+          if (tr.sender && tr.sender.track && tr.sender.track.kind === 'video') {
+            if (typeof tr.setCodecPreferences === 'function') {
+              tr.setCodecPreferences(preferred);
+            }
+          }
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[WebRTC] Falha ao configurar setCodecPreferences:', e);
+  }
+}
+
+// Fallback robusto no SDP para garantir o codec VP8 no topo de m=video
+function preferVP8InSdp(sdp) {
+  if (!sdp || typeof sdp !== 'string') return sdp;
+  const lines = sdp.split('\r\n');
+  const mVideoIndex = lines.findIndex(l => l.startsWith('m=video '));
+  if (mVideoIndex === -1) return sdp;
+
+  let vp8Payload = null;
+  for (const line of lines) {
+    const match = line.match(/^a=rtpmap:(\d+)\s+VP8\/90000/i);
+    if (match) {
+      vp8Payload = match[1];
+      break;
+    }
+  }
+
+  if (!vp8Payload) return sdp;
+
+  const mParts = lines[mVideoIndex].split(' ');
+  const header = mParts.slice(0, 3);
+  const payloads = mParts.slice(3).filter(p => p !== vp8Payload);
+  lines[mVideoIndex] = [...header, vp8Payload, ...payloads].join(' ');
+
+  return lines.join('\r\n');
+}
+
+// Otimização de parâmetros do sender (controle de bitrate e degradação suave de framerate)
+function optimizeVideoSender(sender) {
+  if (!sender || !sender.track || sender.track.kind !== 'video') return;
+  try {
+    const params = sender.getParameters();
+    if (!params.encodings || params.encodings.length === 0) {
+      params.encodings = [{}];
+    }
+    params.encodings[0].maxBitrate = 2500000; // 2.5 Mbps máximo por espectador
+    params.degradationPreference = 'maintain-framerate'; // Prioriza fluidez e estabilidade de FPS
+    sender.setParameters(params).catch(e => console.warn('[WebRTC] setParameters aviso:', e.message));
+  } catch (e) {
+    console.warn('[WebRTC] optimizeVideoSender erro:', e);
+  }
+}
+
 // Gerenciador de Toasts (Notificações)
 function showToast(message, type = 'info') {
   let container = document.getElementById('toast-container');

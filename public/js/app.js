@@ -97,10 +97,6 @@ const studioPreviewVideo = document.getElementById('studioPreviewVideo');
 const btnStudioStart = document.getElementById('btnStudioStart');
 const btnStudioStop = document.getElementById('btnStudioStop');
 
-const modalShareableUrlCode = document.getElementById('modalShareableUrlCode');
-const btnModalCopyLink = document.getElementById('btnModalCopyLink');
-const btnHeaderShare = document.getElementById('btnHeaderShare');
-
 // 3. Estado da Aplicação
 let viewerPeerConn = null;
 let viewerIceQueue = [];
@@ -116,35 +112,7 @@ let broadcasterSourceType = 'screen'; // 'screen' | 'video' | 'camera'
 const broadcasterPeers = new Map(); // viewerId -> RTCPeerConnection
 const broadcasterIceQueues = new Map(); // viewerId -> [candidate]
 
-let networkShareUrl = window.location.origin;
-
-// 4. Carregar informações de IP de Rede para compartilhamento
-async function loadNetworkInfo() {
-  try {
-    const res = await fetch('/api/network-info');
-    if (res.ok) {
-      const data = await res.json();
-      networkShareUrl = `http://${data.primaryIp}:${data.port}`;
-    }
-  } catch (e) {
-    networkShareUrl = window.location.origin;
-  }
-  if (modalShareableUrlCode) modalShareableUrlCode.textContent = networkShareUrl;
-}
-loadNetworkInfo();
-
-function copyShareLink() {
-  navigator.clipboard.writeText(networkShareUrl).then(() => {
-    showToast('Link de acesso copiado! Envie para seus amigos.', 'success');
-  }).catch(() => {
-    showToast(`Copie o link: ${networkShareUrl}`, 'info');
-  });
-}
-
-if (btnModalCopyLink) btnModalCopyLink.addEventListener('click', copyShareLink);
-if (btnHeaderShare) btnHeaderShare.addEventListener('click', copyShareLink);
-
-// 5. Controle do Modal do Estúdio
+// 4. Controle do Modal do Estúdio
 function openStudioModal() {
   studioModal.classList.add('open');
 }
@@ -193,17 +161,33 @@ function setSourceType(type) {
 // 7. Obter Mídia para Transmissão
 async function captureBroadcasterStream() {
   if (broadcasterSourceType === 'screen') {
-    return await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        cursor: 'always',
-        frameRate: { ideal: 60, max: 60 }
-      },
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false
-      }
-    });
+    try {
+      return await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          cursor: 'always',
+          frameRate: { ideal: 30, max: 60 },
+          width: { max: 1920 },
+          height: { max: 1080 }
+        },
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        }
+      });
+    } catch (dispErr) {
+      if (dispErr.name === 'NotAllowedError') throw dispErr;
+      console.warn('[Streamer] Captura com áudio falhou no SO, tentando sem áudio:', dispErr);
+      return await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          cursor: 'always',
+          frameRate: { ideal: 30, max: 60 },
+          width: { max: 1920 },
+          height: { max: 1080 }
+        },
+        audio: false
+      });
+    }
   } else if (broadcasterSourceType === 'camera') {
     return await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -223,9 +207,9 @@ async function captureBroadcasterStream() {
 
     let stream = null;
     if (tempVideo.captureStream) {
-      stream = tempVideo.captureStream(60);
+      stream = tempVideo.captureStream(30);
     } else if (tempVideo.mozCaptureStream) {
-      stream = tempVideo.mozCaptureStream(60);
+      stream = tempVideo.mozCaptureStream(30);
     } else {
       throw new Error('Seu navegador não suporta captura direta de arquivo de vídeo.');
     }
@@ -353,8 +337,15 @@ socket.on('viewer-joined', async ({ viewerId, username: vUser }) => {
 
   // Adicionar todas as tracks de áudio e vídeo
   broadcasterStream.getTracks().forEach(track => {
-    pc.addTrack(track, broadcasterStream);
+    if (track.kind === 'video') {
+      track.contentHint = 'motion';
+    }
+    const sender = pc.addTrack(track, broadcasterStream);
+    optimizeVideoSender(sender);
   });
+
+  // Priorizar VP8 nos transceivers
+  configurePeerVideoCapabilities(pc);
 
   // ICE candidates do Broadcaster para este espectador
   pc.onicecandidate = (event) => {
@@ -375,7 +366,11 @@ socket.on('viewer-joined', async ({ viewerId, username: vUser }) => {
       offerToReceiveAudio: false,
       offerToReceiveVideo: false
     });
-    await pc.setLocalDescription(offer);
+    const modifiedOffer = new RTCSessionDescription({
+      type: offer.type,
+      sdp: preferVP8InSdp(offer.sdp)
+    });
+    await pc.setLocalDescription(modifiedOffer);
 
     socket.emit('webrtc-offer', {
       targetId: viewerId,
@@ -393,7 +388,10 @@ socket.on('webrtc-answer', async ({ senderId, sdp }) => {
   if (!pc) return;
 
   try {
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    await pc.setRemoteDescription(new RTCSessionDescription({
+      type: sdp.type,
+      sdp: preferVP8InSdp(sdp.sdp)
+    }));
 
     // Processar fila de ICE candidates recebidos antes do remote description
     const queue = broadcasterIceQueues.get(senderId) || [];
@@ -704,18 +702,36 @@ socket.on('webrtc-offer', async ({ senderId, sdp }) => {
 
     viewerPeerConn.ontrack = (event) => {
       console.log('[Viewer] Feed recebido:', event.track.kind);
-      if (event.streams && event.streams[0]) {
-        remoteVideo.srcObject = event.streams[0];
-        streamPlaceholder.classList.add('hidden');
-        liveBadge.classList.remove('offline');
-        liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
-
-        const playPromise = remoteVideo.play();
-        if (playPromise !== undefined) {
-          playPromise.catch(() => {
-            if (unmuteBanner) unmuteBanner.style.display = 'flex';
-          });
+      let stream = (event.streams && event.streams[0]) ? event.streams[0] : null;
+      if (!stream) {
+        if (!remoteVideo.srcObject) {
+          remoteVideo.srcObject = new MediaStream();
         }
+        remoteVideo.srcObject.addTrack(event.track);
+      } else {
+        remoteVideo.srcObject = stream;
+      }
+
+      streamPlaceholder.classList.add('hidden');
+      liveBadge.classList.remove('offline');
+      liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
+
+      // Inicia mutado para contornar qualquer bloqueio de autoplay dos navegadores (evita tela preta)
+      remoteVideo.muted = true;
+      const playPromise = remoteVideo.play();
+      if (playPromise !== undefined) {
+        playPromise.then(() => {
+          if (btnPlayPause) btnPlayPause.innerHTML = ICON_PAUSE;
+          // Tenta desmutar caso o navegador permita
+          remoteVideo.muted = false;
+          updateMuteUI();
+        }).catch(() => {
+          // Autoplay com áudio bloqueado: continua tocando o vídeo mutado e exibe banner
+          remoteVideo.muted = true;
+          remoteVideo.play().catch(() => {});
+          updateMuteUI();
+          if (unmuteBanner) unmuteBanner.style.display = 'flex';
+        });
       }
     };
 
@@ -728,7 +744,10 @@ socket.on('webrtc-offer', async ({ senderId, sdp }) => {
       }
     };
 
-    await viewerPeerConn.setRemoteDescription(new RTCSessionDescription(sdp));
+    await viewerPeerConn.setRemoteDescription(new RTCSessionDescription({
+      type: sdp.type,
+      sdp: preferVP8InSdp(sdp.sdp)
+    }));
 
     // Processar fila de ICE candidates
     while (viewerIceQueue.length > 0) {
@@ -736,9 +755,15 @@ socket.on('webrtc-offer', async ({ senderId, sdp }) => {
       await viewerPeerConn.addIceCandidate(new RTCIceCandidate(candidate));
     }
 
+    configurePeerVideoCapabilities(viewerPeerConn);
+
     // Criar resposta
     const answer = await viewerPeerConn.createAnswer();
-    await viewerPeerConn.setLocalDescription(answer);
+    const modifiedAnswer = new RTCSessionDescription({
+      type: answer.type,
+      sdp: preferVP8InSdp(answer.sdp)
+    });
+    await viewerPeerConn.setLocalDescription(modifiedAnswer);
 
     socket.emit('webrtc-answer', {
       targetId: senderId,

@@ -36,8 +36,6 @@ const streamTitleInput = document.getElementById('streamTitleInput');
 const hostStatusBadge = document.getElementById('hostStatusBadge');
 const viewerCountEl = document.getElementById('viewerCount');
 const viewersListContainer = document.getElementById('viewersList');
-const copyLinkBtn = document.getElementById('copyLinkBtn');
-const shareableUrlCode = document.getElementById('shareableUrlCode');
 const resolutionBadge = document.getElementById('resolutionBadge');
 
 // Chat e Reações
@@ -45,38 +43,6 @@ const chatMessages = document.getElementById('chatMessages');
 const chatForm = document.getElementById('chatForm');
 const chatInput = document.getElementById('chatInput');
 const floatingContainer = document.getElementById('floatingReactions');
-
-// 1. Obter informações de IP do servidor para exibir o link correto
-async function loadNetworkInfo() {
-  try {
-    const res = await fetch('/api/network-info');
-    const data = await res.json();
-    const port = data.port;
-    const ip = data.primaryIp;
-    const shareUrl = `http://${ip}:${port}`;
-    if (shareableUrlCode) {
-      shareableUrlCode.textContent = shareUrl;
-    }
-  } catch (err) {
-    console.warn('Erro ao obter IP do servidor:', err);
-    if (shareableUrlCode) {
-      shareableUrlCode.textContent = window.location.origin;
-    }
-  }
-}
-loadNetworkInfo();
-
-// Copiar link com 1 clique
-if (copyLinkBtn) {
-  copyLinkBtn.addEventListener('click', () => {
-    const textToCopy = shareableUrlCode.textContent;
-    navigator.clipboard.writeText(textToCopy).then(() => {
-      showToast('Link de acesso copiado com sucesso!', 'success');
-    }).catch(() => {
-      showToast('Não foi possível copiar automaticamente.', 'error');
-    });
-  });
-}
 
 // 2. Conectar e registrar como Host
 socket.emit('register-host');
@@ -134,19 +100,33 @@ btnStartStream.addEventListener('click', async () => {
 
     if (currentSourceType === 'screen') {
       // Captura de tela com áudio (se selecionado pelo usuário no navegador)
-      stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          displaySurface: 'monitor',
-          frameRate: { ideal: 30, max: 60 },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        },
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false
-        }
-      });
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            displaySurface: 'monitor',
+            frameRate: { ideal: 30, max: 60 },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          },
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          }
+        });
+      } catch (dispErr) {
+        if (dispErr.name === 'NotAllowedError') throw dispErr;
+        console.warn('[Host] Captura com áudio falhou, tentando apenas vídeo:', dispErr);
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            displaySurface: 'monitor',
+            frameRate: { ideal: 30, max: 60 },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          },
+          audio: false
+        });
+      }
     } else if (currentSourceType === 'video') {
       if (!localVideoElement.src) {
         showToast('Selecione um arquivo de vídeo primeiro!', 'error');
@@ -308,10 +288,17 @@ async function setupPeerConnection(viewerId) {
     // Adiciona todas as faixas do stream atual
     if (currentStream) {
       currentStream.getTracks().forEach(track => {
+        if (track.kind === 'video') {
+          track.contentHint = 'motion';
+        }
         console.log(`[Host] Adicionando track: ${track.kind} para ${viewerId}`);
-        pc.addTrack(track, currentStream);
+        const sender = pc.addTrack(track, currentStream);
+        optimizeVideoSender(sender);
       });
     }
+
+    // Configura codec preferences para VP8 se suportado
+    configurePeerVideoCapabilities(pc);
 
     // Enviar ICE candidates gerados para o espectador
     pc.onicecandidate = (event) => {
@@ -338,7 +325,11 @@ async function setupPeerConnection(viewerId) {
 
     // Criar oferta e enviar
     const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    const modifiedOffer = new RTCSessionDescription({
+      type: offer.type,
+      sdp: preferVP8InSdp(offer.sdp)
+    });
+    await pc.setLocalDescription(modifiedOffer);
 
     socket.emit('webrtc-offer', {
       targetId: viewerId,

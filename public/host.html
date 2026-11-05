@@ -38,29 +38,6 @@
 
   <div class="host-dashboard">
 
-    <!-- Link de Compartilhamento -->
-    <div class="copy-banner">
-      <div class="copy-info">
-        <h3>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
-            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-          </svg>
-          Link para seus amigos
-        </h3>
-        <p>Compartilhe com quem estiver na mesma rede. Para acesso externo, use <code style="font-family:var(--mono);font-size:11px;color:var(--text-secondary)">npx localtunnel --port 7070</code></p>
-      </div>
-      <div class="copy-action-box">
-        <code id="shareableUrlCode">Carregando...</code>
-        <button id="copyLinkBtn" class="btn-copy">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-          </svg>
-          Copiar
-        </button>
-      </div>
-    </div>
-
     <div class="host-grid">
       <!-- Coluna Esquerda -->
       <div style="display:flex;flex-direction:column;gap:16px;">
@@ -157,7 +134,7 @@
             Espectadores Conectados
           </div>
           <div id="viewersList" class="viewers-list">
-            <p class="viewers-empty-msg">Nenhum espectador ainda. Compartilhe o link acima!</p>
+            <p class="viewers-empty-msg">Nenhum espectador conectado no momento.</p>
           </div>
         </div>
 

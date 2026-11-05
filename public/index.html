@@ -50,14 +50,6 @@
         <span id="transmitBtnText">Iniciar Transmissão</span>
       </button>
 
-      <!-- Botão Copiar Link da Live -->
-      <button id="btnHeaderShare" class="btn-open-viewer" title="Copiar link para amigos">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-        <span>Link da Live</span>
-      </button>
-
       <!-- Badge do Usuário Logado -->
       <div class="user-badge">
         <div class="user-avatar-circle" id="userInitial">?</div>
@@ -103,7 +95,7 @@
     <!-- Área de Vídeo -->
     <section class="stream-container">
       <div class="video-theater">
-        <video id="remoteVideo" playsinline autoplay></video>
+        <video id="remoteVideo" playsinline autoplay muted></video>
 
         <div id="floatingReactions" class="floating-reactions-canvas"></div>
 
@@ -233,29 +225,6 @@
       </div>
 
       <div class="studio-modal-body">
-        <!-- Compartilhar link com amigos -->
-        <div class="copy-banner" style="margin:0;">
-          <div class="copy-info">
-            <h3 style="display:flex;align-items:center;gap:6px;">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
-                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-              </svg>
-              Link para seus amigos assistirem
-            </h3>
-            <p>Envie este link para qualquer pessoa na sua rede local:</p>
-          </div>
-          <div class="copy-action-box">
-            <code id="modalShareableUrlCode">Carregando...</code>
-            <button id="btnModalCopyLink" class="btn-copy">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-              </svg>
-              Copiar
-            </button>
-          </div>
-        </div>
-
         <!-- Seletor de fonte de mídia -->
         <div>
           <label class="auth-label" style="display:block;margin-bottom:8px;">1. Escolha o que transmitir:</label>
