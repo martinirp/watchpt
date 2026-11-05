@@ -156,6 +156,7 @@ app.get('/host', (req, res) => {
 // Cada streamer conectado pode ter a própria live (multi-stream).
 const streams = new Map();  // streamerSocketId -> { id, username, title, type, startedAt, viewers }
 const viewers = new Map();  // viewerSocketId   -> { id, username, joinedAt, watching }
+const relayInitHeaders = new Map(); // streamerSocketId -> { mimeType, chunk }
 
 function publicStreams() {
   return Array.from(streams.values())
@@ -194,6 +195,7 @@ function endStream(streamerId) {
   const st = streams.get(streamerId);
   if (!st) return;
   streams.delete(streamerId);
+  relayInitHeaders.delete(streamerId);
   st.viewers.forEach((_v, viewerId) => {
     io.to(viewerId).emit('stream-ended', { streamerId });
     const v = viewers.get(viewerId);
@@ -275,6 +277,16 @@ function setupSocketIo() {
       startedAt: st.startedAt,
       viewerCount: st.viewers.size
     });
+
+    // Enviar o cabeçalho de inicialização do relay caso já exista
+    const relayData = relayInitHeaders.get(streamerId);
+    if (relayData) {
+      socket.emit('relay-init', {
+        streamerId,
+        mimeType: relayData.mimeType,
+        chunk: relayData.chunk
+      });
+    }
   });
 
   // Permitir que o espectador peça oferta caso ainda não tenha recebido
@@ -334,14 +346,26 @@ function setupSocketIo() {
     // Repassar o candidato original
     io.to(targetId).emit('webrtc-ice-candidate', { senderId: socket.id, candidate });
 
-    // Se o candidato for host mascarado por mDNS (.local), sintetiza também com o IP real de LAN do remetente
+    // Se o candidato for host mascarado por mDNS (.local), sintetiza também com o IP real de LAN
     if (candidate && typeof candidate.candidate === 'string' && candidate.candidate.includes('.local')) {
       let rawIp = socket.handshake.address || (socket.conn && socket.conn.remoteAddress) || '';
       if (rawIp.startsWith('::ffff:')) rawIp = rawIp.substring(7);
       if (rawIp === '::1') rawIp = '127.0.0.1';
 
+      const candidateIps = [];
       if (/^\d+\.\d+\.\d+\.\d+$/.test(rawIp) && rawIp !== '127.0.0.1') {
-        const unmaskedCandidate = candidate.candidate.replace(/\s[^\s]+\.local\s/, ` ${rawIp} `);
+        candidateIps.push(rawIp);
+      } else {
+        // Se a conexão do host veio de 127.0.0.1 (servidor na mesma máquina), injeta os IPs locais da máquina
+        getLocalIpAddresses().forEach(item => {
+          if (item.address && !candidateIps.includes(item.address)) {
+            candidateIps.push(item.address);
+          }
+        });
+      }
+
+      for (const ip of candidateIps) {
+        const unmaskedCandidate = candidate.candidate.replace(/\s[^\s]+\.local\s/, ` ${ip} `);
         if (unmaskedCandidate !== candidate.candidate) {
           io.to(targetId).emit('webrtc-ice-candidate', {
             senderId: socket.id,
@@ -354,6 +378,46 @@ function setupSocketIo() {
           });
         }
       }
+    }
+  });
+
+  // ── Relay WebSocket (Modo Garantido de Streaming) ────────
+  socket.on('relay-init', ({ mimeType, chunk }) => {
+    if (!streams.has(socket.id)) return;
+    relayInitHeaders.set(socket.id, { mimeType, chunk });
+    socket.to(streamRoom(socket.id)).emit('relay-init', {
+      streamerId: socket.id,
+      mimeType,
+      chunk
+    });
+  });
+
+  socket.on('relay-chunk', (chunk) => {
+    if (!streams.has(socket.id)) return;
+    socket.to(streamRoom(socket.id)).emit('relay-chunk', {
+      streamerId: socket.id,
+      chunk
+    });
+  });
+
+  socket.on('request-relay-init', ({ streamerId } = {}) => {
+    const v = viewers.get(socket.id);
+    const target = streamerId || (v && v.watching);
+    if (!target) return;
+    const relayData = relayInitHeaders.get(target);
+    if (relayData) {
+      socket.emit('relay-init', {
+        streamerId: target,
+        mimeType: relayData.mimeType,
+        chunk: relayData.chunk
+      });
+    }
+  });
+
+  socket.on('request-keyframe', ({ streamerId } = {}) => {
+    const target = streamerId || (viewers.get(socket.id) && viewers.get(socket.id).watching);
+    if (target) {
+      io.to(target).emit('request-keyframe');
     }
   });
 

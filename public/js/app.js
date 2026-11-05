@@ -112,6 +112,70 @@ let broadcasterSourceType = 'screen'; // 'screen' | 'video' | 'camera'
 const broadcasterPeers = new Map(); // viewerId -> RTCPeerConnection
 const broadcasterIceQueues = new Map(); // viewerId -> [candidate]
 
+// ─── Transmissão Híbrida: WebSocket Relay Garantido (MSE) ───
+let streamMode = 'auto'; // 'auto' | 'relay' | 'p2p'
+let relayActive = false;
+let relayMediaSource = null;
+let relaySourceBuffer = null;
+let relayQueue = [];
+let relayAppending = false;
+let relayBytesTotal = 0;
+let relayLastBytes = 0;
+let relayLastTimestamp = Date.now();
+let relayInitReceived = false;
+let relayCurrentMime = 'video/webm; codecs="vp8,opus"';
+let webrtcFallbackTimer = null;
+
+// Broadcaster MediaRecorder para WebSocket Relay
+let broadcasterRelayRecorder = null;
+let broadcasterRelayMime = null;
+let broadcasterFirstChunk = null;
+
+function startBroadcasterRelay(stream) {
+  stopBroadcasterRelay();
+  broadcasterRelayMime = typeof getOptimalMediaMimeType === 'function' ? getOptimalMediaMimeType() : 'video/webm; codecs="vp8,opus"';
+  try {
+    broadcasterRelayRecorder = new MediaRecorder(stream, {
+      mimeType: broadcasterRelayMime,
+      videoBitsPerSecond: 2500000
+    });
+    let isFirst = true;
+
+    broadcasterRelayRecorder.ondataavailable = async (e) => {
+      if (!isBroadcaster || !e.data || e.data.size === 0) return;
+      try {
+        const buffer = await e.data.arrayBuffer();
+        if (isFirst) {
+          isFirst = false;
+          broadcasterFirstChunk = buffer;
+          socket.emit('relay-init', { mimeType: broadcasterRelayMime, chunk: buffer });
+        } else {
+          socket.emit('relay-chunk', buffer);
+        }
+      } catch (err) {
+        console.warn('[Relay Host] Erro ao enviar buffer:', err);
+      }
+    };
+
+    broadcasterRelayRecorder.start(180);
+    console.log(`[Relay Host] Gravador ativado com sucesso: ${broadcasterRelayMime}`);
+  } catch (err) {
+    console.warn('[Relay Host] Falha ao iniciar MediaRecorder:', err);
+  }
+}
+
+function stopBroadcasterRelay() {
+  if (broadcasterRelayRecorder) {
+    try {
+      if (broadcasterRelayRecorder.state !== 'inactive') {
+        broadcasterRelayRecorder.stop();
+      }
+    } catch (e) {}
+    broadcasterRelayRecorder = null;
+  }
+  broadcasterFirstChunk = null;
+}
+
 // 4. Controle do Modal do Estúdio
 function openStudioModal() {
   studioModal.classList.add('open');
@@ -240,6 +304,7 @@ if (btnStudioStart) {
       });
 
       isBroadcaster = true;
+      startBroadcasterRelay(broadcasterStream);
       updateBroadcasterUI(true);
       showToast('Transmissão ao vivo iniciada com sucesso!', 'live');
       closeStudioModal();
@@ -275,6 +340,7 @@ function updateBroadcasterUI(live) {
 
 // 9. Parar Transmissão
 function stopBroadcasting() {
+  stopBroadcasterRelay();
   if (broadcasterStream) {
     broadcasterStream.getTracks().forEach(track => track.stop());
     broadcasterStream = null;
@@ -431,6 +497,15 @@ socket.on('streamer-conflict', ({ message }) => {
   stopBroadcasting();
 });
 
+// Solicitação de keyframe do relay para o streamer
+socket.on('request-keyframe', () => {
+  if (broadcasterRelayRecorder && broadcasterRelayRecorder.state === 'recording') {
+    try {
+      broadcasterRelayRecorder.requestData();
+    } catch(e){}
+  }
+});
+
 // ============================================================
 // 11. Lobby de Lives + Lógica do Espectador (Viewer)
 // ============================================================
@@ -517,6 +592,138 @@ function renderLobby() {
   activeStreams.forEach(s => lobbyGrid.appendChild(buildLiveCard(s)));
 }
 
+// ─── Lógica do Viewer com Relay Garantido (MSE) e Fallback ───
+
+function startRelayPlayback(mimeType, initChunk) {
+  stopRelayPlayback();
+  relayActive = true;
+  relayQueue = [];
+  relayBytesTotal = 0;
+  relayLastBytes = 0;
+  relayLastTimestamp = Date.now();
+
+  if (streamerByInfo && currentStreamMeta) {
+    streamerByInfo.innerHTML = `Transmitido por <strong>${escapeHtml(currentStreamMeta.username)}</strong> · ⚡ Relay WebSocket Garantido`;
+  }
+
+  if (!window.MediaSource) {
+    showToast('Seu navegador não suporta MediaSource para streaming garantido.', 'error');
+    return;
+  }
+
+  const ms = new MediaSource();
+  relayMediaSource = ms;
+  remoteVideo.srcObject = null;
+  remoteVideo.src = URL.createObjectURL(ms);
+
+  ms.addEventListener('sourceopen', () => {
+    if (relayMediaSource !== ms) return;
+    try {
+      const mime = (mimeType && MediaSource.isTypeSupported(mimeType)) ? mimeType : (typeof getOptimalMediaMimeType === 'function' ? getOptimalMediaMimeType() : 'video/webm; codecs="vp8,opus"');
+      relayCurrentMime = mime;
+      const sb = ms.addSourceBuffer(mime);
+      sb.mode = 'sequence'; // Modo contínuo em tempo real sem saltos
+      relaySourceBuffer = sb;
+
+      sb.addEventListener('updateend', () => {
+        relayAppending = false;
+        if (sb.buffered.length > 0) {
+          const end = sb.buffered.end(sb.buffered.length - 1);
+          const diff = end - remoteVideo.currentTime;
+          // Se o vídeo estiver atrasado mais de 1.2s, cola no live edge
+          if (diff > 1.2 && !remoteVideo.paused) {
+            remoteVideo.currentTime = end - 0.2;
+          }
+          // Limpeza periódica do buffer para não sobrecarregar RAM
+          const start = sb.buffered.start(0);
+          const trim = remoteVideo.currentTime - 10;
+          if (trim > start + 5 && !sb.updating) {
+            try { sb.remove(start, trim); return; } catch(e){}
+          }
+        }
+        pumpRelayQueue();
+      });
+
+      sb.addEventListener('error', (e) => {
+        console.warn('[Relay MSE] Erro no SourceBuffer:', e);
+      });
+
+      if (initChunk) {
+        relayQueue.push(initChunk);
+      }
+      pumpRelayQueue();
+
+    } catch (err) {
+      console.error('[Relay MSE] Erro ao adicionar SourceBuffer:', err);
+    }
+  }, { once: true });
+
+  remoteVideo.muted = true;
+  remoteVideo.play().then(() => {
+    remoteVideo.muted = false;
+    updateMuteUI();
+  }).catch(() => {
+    updateMuteUI();
+    if (unmuteBanner) unmuteBanner.style.display = 'flex';
+  });
+}
+
+function stopRelayPlayback() {
+  relayActive = false;
+  relayQueue = [];
+  relayAppending = false;
+  relayInitReceived = false;
+  if (relaySourceBuffer) {
+    try {
+      if (relaySourceBuffer.updating) relaySourceBuffer.abort();
+    } catch(e){}
+    relaySourceBuffer = null;
+  }
+  if (relayMediaSource) {
+    try {
+      if (relayMediaSource.readyState === 'open') relayMediaSource.endOfStream();
+    } catch(e){}
+    relayMediaSource = null;
+  }
+}
+
+function pumpRelayQueue() {
+  if (!relaySourceBuffer || relayAppending || relaySourceBuffer.updating || relayQueue.length === 0) {
+    return;
+  }
+  const chunk = relayQueue.shift();
+  relayAppending = true;
+  try {
+    relaySourceBuffer.appendBuffer(chunk);
+    if (streamPlaceholder) streamPlaceholder.classList.add('hidden');
+    if (liveBadge) {
+      liveBadge.classList.remove('offline');
+      liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
+    }
+  } catch (err) {
+    relayAppending = false;
+    if (err && err.name === 'QuotaExceededError') {
+      try {
+        const start = relaySourceBuffer.buffered.start(0);
+        const trim = remoteVideo.currentTime - 4;
+        if (trim > start) relaySourceBuffer.remove(start, trim);
+      } catch(e){}
+    } else {
+      console.warn('[Relay MSE] appendBuffer:', err);
+    }
+  }
+}
+
+function activateRelayFallback(reason) {
+  if (relayActive) return;
+  console.log(`[Viewer] Ativando Relay Fallback (${reason})`);
+  showToast(reason, 'info');
+  closeViewerPeer();
+  relayActive = true;
+  socket.emit('request-relay-init', { streamerId: watchingStreamId });
+  socket.emit('request-keyframe', { streamerId: watchingStreamId });
+}
+
 function startWatching(stream) {
   watchingStreamId = stream.id;
   currentStreamMeta = stream;
@@ -529,10 +736,12 @@ function startWatching(stream) {
   }
 
   closeViewerPeer();
+  stopRelayPlayback();
+  clearTimeout(webrtcFallbackTimer);
 
   if (streamTitleEl) streamTitleEl.textContent = stream.title;
-  if (streamerByInfo) streamerByInfo.innerHTML = `Transmitido por <strong>${escapeHtml(stream.username)}</strong> · P2P WebRTC`;
   remoteVideo.srcObject = null;
+  remoteVideo.src = '';
   streamPlaceholder.classList.remove('hidden');
   placeholderTitle.textContent = 'Conectando à live...';
   placeholderDesc.textContent = 'Aguarde enquanto a transmissão é estabelecida.';
@@ -541,11 +750,32 @@ function startWatching(stream) {
   startHud();
   socket.emit('watch-stream', { streamerId: stream.id });
 
+  if (streamMode === 'relay') {
+    // Forçar modo Relay Garantido
+    activateRelayFallback('Conectando via Modo Garantido (Relay WebSocket)...');
+    return;
+  }
+
+  // Modo Automático ou P2P:
+  if (streamerByInfo) streamerByInfo.innerHTML = `Transmitido por <strong>${escapeHtml(stream.username)}</strong> · P2P WebRTC`;
+
   setTimeout(() => {
-    if (watchingStreamId === stream.id && !remoteVideo.srcObject) {
+    if (watchingStreamId === stream.id && !remoteVideo.srcObject && !relayActive) {
       socket.emit('request-offer');
     }
   }, 1200);
+
+  // Se estiver em modo 'auto', programa verificação de fallback inteligente
+  if (streamMode === 'auto') {
+    webrtcFallbackTimer = setTimeout(() => {
+      if (watchingStreamId === stream.id && !relayActive) {
+        const ice = viewerPeerConn ? viewerPeerConn.iceConnectionState : 'new';
+        if (ice === 'checking' || ice === 'failed' || ice === 'disconnected' || !remoteVideo.srcObject || remoteVideo.videoWidth === 0) {
+          activateRelayFallback('UDP P2P bloqueado pelo roteador/firewall. Fallback automático ativado!');
+        }
+      }
+    }, 4500);
+  }
 }
 
 function closeViewerPeer() {
@@ -567,6 +797,7 @@ function enterSelfView() {
   isWatchingSelf = true;
 
   closeViewerPeer();
+  stopRelayPlayback();
 
   remoteVideo.srcObject = broadcasterStream;
   remoteVideo.muted = true; // evita eco do próprio áudio
@@ -587,6 +818,8 @@ function enterSelfView() {
 }
 
 function stopWatching() {
+  clearTimeout(webrtcFallbackTimer);
+  stopRelayPlayback();
   stopHud();
   if (watchingStreamId) {
     socket.emit('watch-stream', { streamerId: null });
@@ -596,6 +829,7 @@ function stopWatching() {
   currentStreamMeta = null;
   closeViewerPeer();
   remoteVideo.srcObject = null;
+  remoteVideo.src = '';
   if (btnPlayPause) btnPlayPause.innerHTML = ICON_PLAY;
   showLobby();
 }
@@ -738,16 +972,25 @@ socket.on('webrtc-offer', async ({ senderId, sdp }) => {
       console.log(`[Viewer] ICE state: ${state}`);
       if (state === 'connected' || state === 'completed') {
         console.log('[Viewer] Conexão P2P com streamer estabelecida com sucesso!');
+        clearTimeout(webrtcFallbackTimer);
       } else if (state === 'failed') {
-        console.warn('[Viewer] Conexão ICE falhou. Solicitando reinício de oferta...');
-        socket.emit('request-offer');
+        console.warn('[Viewer] Conexão ICE falhou (bloqueio UDP P2P detectado).');
+        if (streamMode === 'auto' && !relayActive) {
+          activateRelayFallback('ICE falhou (UDP bloqueado). Conectando via Relay WebSocket garantido...');
+        } else if (streamMode === 'p2p') {
+          socket.emit('request-offer');
+        }
       }
     };
 
     viewerPeerConn.onconnectionstatechange = () => {
       console.log(`[Viewer] Connection state: ${viewerPeerConn.connectionState}`);
       if (viewerPeerConn.connectionState === 'failed') {
-        socket.emit('request-offer');
+        if (streamMode === 'auto' && !relayActive) {
+          activateRelayFallback('Conexão WebRTC falhou. Ativando Relay WebSocket garantido...');
+        } else if (streamMode === 'p2p') {
+          socket.emit('request-offer');
+        }
       }
     };
 
@@ -774,6 +1017,37 @@ socket.on('webrtc-offer', async ({ senderId, sdp }) => {
   } catch (err) {
     console.error('[Viewer] Erro ao aceitar oferta WebRTC:', err);
   }
+});
+
+// Receber cabeçalho de inicialização do Relay (EBML Header)
+socket.on('relay-init', ({ streamerId, mimeType, chunk }) => {
+  if (!watchingStreamId || (streamerId && streamerId !== watchingStreamId)) return;
+  if (!relayActive && streamMode === 'p2p') return;
+  console.log('[Viewer] relay-init recebido do servidor.');
+  relayInitReceived = true;
+  startRelayPlayback(mimeType, chunk);
+});
+
+// Receber fatia de vídeo/áudio em tempo real via WebSocket
+socket.on('relay-chunk', ({ streamerId, chunk }) => {
+  if (!watchingStreamId || (streamerId && streamerId !== watchingStreamId)) return;
+  if (!relayActive && streamMode !== 'relay') return;
+
+  const len = chunk.byteLength || (chunk.length || 0);
+  relayBytesTotal += len;
+
+  if (!relayMediaSource || !relaySourceBuffer) {
+    if (!relayInitReceived) {
+      socket.emit('request-relay-init', { streamerId: watchingStreamId });
+    }
+    return;
+  }
+
+  if (relayQueue.length > 60) {
+    relayQueue.splice(0, 15);
+  }
+  relayQueue.push(chunk);
+  pumpRelayQueue();
 });
 
 // Eventos de detecção de vídeo no elemento
@@ -994,6 +1268,60 @@ async function updateHud() {
 
   hudSocket.textContent = socket && socket.connected ? `Conectado (${socket.id?.substring(0, 5)})` : 'Desconectado';
 
+  const selectStreamMode = document.getElementById('selectStreamMode');
+  if (selectStreamMode && selectStreamMode.value !== streamMode) {
+    selectStreamMode.value = streamMode;
+  }
+
+  if (relayActive) {
+    if (hudPeer) { hudPeer.textContent = 'Relay Conectado'; hudPeer.style.color = '#51cf66'; }
+    if (hudIce) { hudIce.textContent = 'TCP Porta 7070 (Bypass AP/UDP OK)'; hudIce.style.color = '#51cf66'; }
+    if (hudPeerIp) { hudPeerIp.textContent = 'Servidor Node.js (Local)'; }
+    if (hudCodec) { hudCodec.textContent = relayCurrentMime.includes('vp9') ? 'VP9 / Opus (MSE)' : 'VP8 / Opus (MSE)'; }
+
+    const now = Date.now();
+    const dt = (now - relayLastTimestamp) / 1000;
+    const bitrate = dt > 0 ? Math.round(((relayBytesTotal - relayLastBytes) * 8) / dt / 1000) : 0;
+    relayLastBytes = relayBytesTotal;
+    relayLastTimestamp = now;
+
+    if (hudBytes) hudBytes.textContent = (relayBytesTotal > 1048576) ? (relayBytesTotal / 1048576).toFixed(2) + ' MB' : Math.round(relayBytesTotal / 1024) + ' KB';
+    if (hudBitrate) hudBitrate.textContent = Math.max(0, bitrate) + ' kbps';
+    if (hudFrames) hudFrames.textContent = '-';
+    if (hudRes) hudRes.textContent = `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`;
+
+    if (hudVideoState) {
+      if (remoteVideo.videoWidth > 0 && !remoteVideo.paused) {
+        hudVideoState.textContent = 'Reproduzindo (Relay)';
+        hudVideoState.style.color = '#51cf66';
+      } else if (remoteVideo.paused) {
+        hudVideoState.textContent = 'Pausado';
+        hudVideoState.style.color = '#ff6b6b';
+      } else {
+        hudVideoState.textContent = 'Bufferizando...';
+        hudVideoState.style.color = '#fcc419';
+      }
+    }
+
+    if (hudAlertRow) hudAlertRow.style.display = 'block';
+    if (hudAlertText) hudAlertText.textContent = '⚡ Modo Garantido Ativo: Transmissão fluindo via WebSocket TCP através do servidor Node.js (imune a bloqueios de portas UDP/AP Isolation).';
+
+    lastStatsData = {
+      streamId: watchingStreamId,
+      mode: 'relay',
+      peerState: 'relay-connected',
+      iceState: 'tcp-relay',
+      peerIp: 'node-server',
+      codec: relayCurrentMime,
+      bytesReceived: relayBytesTotal,
+      bitrateKbps: bitrate,
+      resolution: `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`,
+      videoPaused: remoteVideo.paused,
+      videoMuted: remoteVideo.muted
+    };
+    return;
+  }
+
   if (!viewerPeerConn) {
     if (hudPeer) { hudPeer.textContent = 'Aguardando oferta...'; hudPeer.style.color = '#8b949e'; }
     if (hudIce) { hudIce.textContent = 'Aguardando...'; hudIce.style.color = '#8b949e'; }
@@ -1097,4 +1425,34 @@ async function updateHud() {
   } catch (e) {
     console.warn('[HUD] getStats aviso:', e.message);
   }
+}
+
+// 14. Controles de Seleção de Modo (Relay / P2P / Auto)
+const selectStreamMode = document.getElementById('selectStreamMode');
+if (selectStreamMode) {
+  selectStreamMode.addEventListener('change', (e) => {
+    streamMode = e.target.value;
+    if (streamMode === 'relay' && !relayActive && watchingStreamId) {
+      activateRelayFallback('Modo Garantido (WebSocket Relay) selecionado manualmente.');
+    } else if (streamMode === 'p2p' && relayActive && watchingStreamId) {
+      stopRelayPlayback();
+      showToast('Tentando modo WebRTC P2P...', 'info');
+      startWatching(currentStreamMeta);
+    }
+  });
+}
+
+const btnSwitchToRelay = document.getElementById('btnSwitchToRelay');
+if (btnSwitchToRelay) {
+  btnSwitchToRelay.addEventListener('click', () => {
+    if (!watchingStreamId) return;
+    if (!relayActive) {
+      streamMode = 'relay';
+      const sel = document.getElementById('selectStreamMode');
+      if (sel) sel.value = 'relay';
+      activateRelayFallback('Alternado para Modo Garantido (WebSocket Relay)!');
+    } else {
+      showToast('O Modo Garantido (Relay) já está ativo e transmitindo!', 'info');
+    }
+  });
 }

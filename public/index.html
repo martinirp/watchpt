@@ -107,6 +107,13 @@
             </div>
           </div>
           <div id="hudBody" class="hud-body">
+            <div class="hud-row"><span>Modo de Rede:</span>
+              <select id="selectStreamMode" style="background:#161b22;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 4px;font-size:11px;font-family:inherit;">
+                <option value="auto">🔄 Automático (WebRTC + Fallback)</option>
+                <option value="relay">⚡ Modo Garantido (WebSocket Relay)</option>
+                <option value="p2p">🚀 WebRTC P2P Direto</option>
+              </select>
+            </div>
             <div class="hud-row"><span>Sinalização:</span> <strong id="hudSocket">Conectando...</strong></div>
             <div class="hud-row"><span>Conexão P2P (Peer):</span> <strong id="hudPeer">Iniciando...</strong></div>
             <div class="hud-row"><span>Rede (ICE):</span> <strong id="hudIce">Aguardando...</strong></div>
@@ -152,6 +159,7 @@
             </div>
           </div>
           <div class="controls-right">
+            <button id="btnSwitchToRelay" class="ctrl-btn" title="Alternar para Modo Garantido (WebSocket Relay)" type="button" style="font-size:11px;font-weight:700;font-family:var(--mono);padding:0 8px;background:rgba(88,166,255,0.15);border:1px solid rgba(88,166,255,0.4);border-radius:4px;color:#58a6ff;">⚡ Relay</button>
             <button id="btnOpenHud" class="ctrl-btn" title="Diagnóstico WebRTC" type="button" style="font-size:11px;font-weight:700;font-family:var(--mono);padding:0 6px;">HUD</button>
             <button id="btnPip" class="ctrl-btn" title="Picture in Picture">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

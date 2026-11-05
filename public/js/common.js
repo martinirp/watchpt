@@ -1,21 +1,40 @@
-// Configurações WebRTC padronizadas (STUN + TURN Relay gratuito de alta compatibilidade)
+// Configurações WebRTC padronizadas (STUN ultrarrápido para LAN e WAN)
 const RTC_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
-    {
-      urls: [
-        'turn:openrelay.metered.ca:80',
-        'turn:openrelay.metered.ca:443',
-        'turn:openrelay.metered.ca:443?transport=tcp'
-      ],
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    }
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
   ],
-  iceCandidatePoolSize: 10
+  iceCandidatePoolSize: 4
 };
+
+// Detecta o melhor MIME type suportado pelo navegador para MediaRecorder e MediaSource (MSE)
+function getOptimalMediaMimeType() {
+  const candidates = [
+    'video/webm; codecs="vp8,opus"',
+    'video/webm; codecs="vp8"',
+    'video/webm; codecs="vp9,opus"',
+    'video/webm; codecs="vp9"',
+    'video/webm'
+  ];
+
+  for (const mime of candidates) {
+    const recSupported = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mime);
+    const mseSupported = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(mime);
+    if (recSupported && mseSupported) {
+      return mime;
+    }
+  }
+
+  for (const mime of candidates) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mime)) {
+      return mime;
+    }
+  }
+
+  return 'video/webm';
+}
 
 // ─── Otimizações WebRTC e Codecs ─────────────────────────────
 
