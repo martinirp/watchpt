@@ -1,14 +1,34 @@
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
 // Configurações do Manager (iguais ao invoker-bot)
 const RESTART_DELAY = 3000;    // Delay antes de reiniciar (3 segundos)
 const MAX_RESTARTS = 10;       // Máximo de restarts consecutivos
 const RESTART_WINDOW = 60000;  // Janela de tempo para contar restarts (1 minuto)
 
+const DATA_DIR = path.join(__dirname, 'data');
+const PID_FILE = path.join(DATA_DIR, 'server.pid');
+
+function saveServerPid(pid) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(PID_FILE, String(pid), 'utf8');
+  } catch (e) {
+    console.warn('⚠️  [MANAGER] Não foi possível salvar data/server.pid:', e.message);
+  }
+}
+
+function removeServerPid() {
+  try {
+    if (fs.existsSync(PID_FILE)) fs.unlinkSync(PID_FILE);
+  } catch (e) {}
+}
+
 let restartCount = 0;
 let lastRestartTime = 0;
 let serverProcess = null;
+let uptimeTimer = null;
 
 function shouldRestart() {
   const now = Date.now();
@@ -40,8 +60,22 @@ function startServer() {
     env: process.env
   });
 
+  if (serverProcess && serverProcess.pid) {
+    saveServerPid(serverProcess.pid);
+    console.log(`📌 [MANAGER] StreamHub rodando sob PID: ${serverProcess.pid}`);
+  }
+
+  // Se o servidor ficar estável por 10s, zera contador de restarts (para reinícios manuais não acumularem)
+  if (uptimeTimer) clearTimeout(uptimeTimer);
+  uptimeTimer = setTimeout(() => {
+    if (serverProcess) {
+      restartCount = 0;
+    }
+  }, 10000);
+
   serverProcess.on('exit', (code, signal) => {
     console.log(`\n⚠️  [MANAGER] StreamHub encerrou (code: ${code}, signal: ${signal})`);
+    removeServerPid();
     serverProcess = null;
 
     if (shouldRestart()) {
@@ -61,12 +95,14 @@ function startServer() {
 // Encerramento gracioso de sinais do SO
 process.on('SIGTERM', () => {
   console.log('\n🛑 [MANAGER] SIGTERM recebido, encerrando...');
+  removeServerPid();
   if (serverProcess) serverProcess.kill('SIGTERM');
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
   console.log('\n🛑 [MANAGER] SIGINT (Ctrl+C) recebido, encerrando...');
+  removeServerPid();
   if (serverProcess) serverProcess.kill('SIGINT');
   process.exit(0);
 });

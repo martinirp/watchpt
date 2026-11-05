@@ -17,6 +17,21 @@ let PORT = parseInt(process.env.PORT, 10) || 7070;
 // ─── Arquivos de dados ─────────────────────────────────────
 const DATA_DIR   = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const PID_FILE   = path.join(DATA_DIR, 'server.pid');
+
+try {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(PID_FILE, String(process.pid), 'utf8');
+} catch (e) {}
+
+process.on('SIGTERM', () => {
+  console.log('[Server] SIGTERM recebido. Encerrando servidor HTTP...');
+  if (server) {
+    server.close(() => process.exit(0));
+  } else {
+    process.exit(0);
+  }
+});
 
 function loadUsers() {
   try {

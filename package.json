@@ -5,7 +5,9 @@
   "main": "start.js",
   "scripts": {
     "start": "node start.js",
-    "server": "node server.js"
+    "server": "node server.js",
+    "restart": "node restart.js",
+    "reload": "node restart.js"
   },
   "pkg": {
     "assets": [
