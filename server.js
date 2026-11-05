@@ -331,7 +331,30 @@ function setupSocketIo() {
 
   // ── WebRTC: ICE Candidate ───────────────────────────────
   socket.on('webrtc-ice-candidate', ({ targetId, candidate }) => {
+    // Repassar o candidato original
     io.to(targetId).emit('webrtc-ice-candidate', { senderId: socket.id, candidate });
+
+    // Se o candidato for host mascarado por mDNS (.local), sintetiza também com o IP real de LAN do remetente
+    if (candidate && typeof candidate.candidate === 'string' && candidate.candidate.includes('.local')) {
+      let rawIp = socket.handshake.address || (socket.conn && socket.conn.remoteAddress) || '';
+      if (rawIp.startsWith('::ffff:')) rawIp = rawIp.substring(7);
+      if (rawIp === '::1') rawIp = '127.0.0.1';
+
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(rawIp) && rawIp !== '127.0.0.1') {
+        const unmaskedCandidate = candidate.candidate.replace(/\s[^\s]+\.local\s/, ` ${rawIp} `);
+        if (unmaskedCandidate !== candidate.candidate) {
+          io.to(targetId).emit('webrtc-ice-candidate', {
+            senderId: socket.id,
+            candidate: {
+              candidate: unmaskedCandidate,
+              sdpMid: candidate.sdpMid,
+              sdpMLineIndex: candidate.sdpMLineIndex,
+              usernameFragment: candidate.usernameFragment
+            }
+          });
+        }
+      }
+    }
   });
 
   // ── Sala atual (live que este socket está assistindo/transmitindo) ──

@@ -163,12 +163,7 @@ async function captureBroadcasterStream() {
   if (broadcasterSourceType === 'screen') {
     try {
       return await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          cursor: 'always',
-          frameRate: { ideal: 30, max: 60 },
-          width: { max: 1920 },
-          height: { max: 1080 }
-        },
+        video: true,
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
@@ -179,12 +174,7 @@ async function captureBroadcasterStream() {
       if (dispErr.name === 'NotAllowedError') throw dispErr;
       console.warn('[Streamer] Captura com áudio falhou no SO, tentando sem áudio:', dispErr);
       return await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          cursor: 'always',
-          frameRate: { ideal: 30, max: 60 },
-          width: { max: 1920 },
-          height: { max: 1080 }
-        },
+        video: true,
         audio: false
       });
     }
@@ -357,8 +347,12 @@ socket.on('viewer-joined', async ({ viewerId, username: vUser }) => {
     }
   };
 
+  pc.oniceconnectionstatechange = () => {
+    console.log(`[Broadcaster] ICE state com ${vUser}: ${pc.iceConnectionState}`);
+  };
+
   pc.onconnectionstatechange = () => {
-    console.log(`[Broadcaster] Estado com ${vUser}: ${pc.connectionState}`);
+    console.log(`[Broadcaster] Connection state com ${vUser}: ${pc.connectionState}`);
   };
 
   try {
@@ -366,16 +360,13 @@ socket.on('viewer-joined', async ({ viewerId, username: vUser }) => {
       offerToReceiveAudio: false,
       offerToReceiveVideo: false
     });
-    const modifiedOffer = new RTCSessionDescription({
-      type: offer.type,
-      sdp: preferVP8InSdp(offer.sdp)
-    });
-    await pc.setLocalDescription(modifiedOffer);
+    await pc.setLocalDescription(offer);
 
     socket.emit('webrtc-offer', {
       targetId: viewerId,
       sdp: pc.localDescription
     });
+    console.log(`[Broadcaster] Oferta WebRTC enviada com sucesso para ${vUser}`);
   } catch (err) {
     console.error(`[Broadcaster] Erro ao criar oferta para ${vUser}:`, err);
   }
@@ -388,34 +379,28 @@ socket.on('webrtc-answer', async ({ senderId, sdp }) => {
   if (!pc) return;
 
   try {
-    await pc.setRemoteDescription(new RTCSessionDescription({
-      type: sdp.type,
-      sdp: preferVP8InSdp(sdp.sdp)
-    }));
+    console.log(`[Broadcaster] Resposta WebRTC recebida de ${senderId}`);
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
 
     // Processar fila de ICE candidates recebidos antes do remote description
     const queue = broadcasterIceQueues.get(senderId) || [];
-    while (queue.length > 0) {
-      const candidate = queue.shift();
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    broadcasterIceQueues.set(senderId, []);
+    for (const candidate of queue) {
+      await addIceCandidateSafely(pc, candidate, 'Broadcaster');
     }
   } catch (err) {
     console.error('[Broadcaster] Erro ao processar resposta do viewer:', err);
   }
 });
 
-// ICE candidate enviado pelo Viewer ao Broadcaster
+// ICE candidate enviado pelo Viewer ao Broadcaster ou vice-versa
 socket.on('webrtc-ice-candidate', async ({ senderId, candidate }) => {
   if (isBroadcaster) {
     const pc = broadcasterPeers.get(senderId);
     if (!pc) return;
 
-    if (pc.remoteDescription) {
-      try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (err) {
-        console.warn('[Broadcaster] Erro ao adicionar ICE candidate:', err);
-      }
+    if (pc.remoteDescription && pc.remoteDescription.type) {
+      await addIceCandidateSafely(pc, candidate, 'Broadcaster');
     } else {
       const queue = broadcasterIceQueues.get(senderId) || [];
       queue.push(candidate);
@@ -423,12 +408,8 @@ socket.on('webrtc-ice-candidate', async ({ senderId, candidate }) => {
     }
   } else {
     // Caso de uso: receptor é o Viewer
-    if (viewerPeerConn && viewerPeerConn.remoteDescription) {
-      try {
-        await viewerPeerConn.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (err) {
-        console.warn('[Viewer] Erro ao adicionar ICE candidate:', err);
-      }
+    if (viewerPeerConn && viewerPeerConn.remoteDescription && viewerPeerConn.remoteDescription.type) {
+      await addIceCandidateSafely(viewerPeerConn, candidate, 'Viewer');
     } else {
       viewerIceQueue.push(candidate);
     }
@@ -693,15 +674,14 @@ socket.on('webrtc-offer', async ({ senderId, sdp }) => {
 
   try {
     if (viewerPeerConn) {
-      viewerPeerConn.close();
+      try { viewerPeerConn.close(); } catch(e){}
       viewerPeerConn = null;
     }
-    viewerIceQueue = [];
 
     viewerPeerConn = new RTCPeerConnection(RTC_CONFIG);
 
     viewerPeerConn.ontrack = (event) => {
-      console.log('[Viewer] Feed recebido:', event.track.kind);
+      console.log('[Viewer] Track recebida:', event.track.kind, 'muted:', event.track.muted);
       let stream = (event.streams && event.streams[0]) ? event.streams[0] : null;
       if (!stream) {
         if (!remoteVideo.srcObject) {
@@ -712,9 +692,12 @@ socket.on('webrtc-offer', async ({ senderId, sdp }) => {
         remoteVideo.srcObject = stream;
       }
 
-      streamPlaceholder.classList.add('hidden');
-      liveBadge.classList.remove('offline');
-      liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
+      event.track.onunmute = () => {
+        console.log('[Viewer] Track pronta para renderização:', event.track.kind);
+        streamPlaceholder.classList.add('hidden');
+        liveBadge.classList.remove('offline');
+        liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
+      };
 
       // Inicia mutado para contornar qualquer bloqueio de autoplay dos navegadores (evita tela preta)
       remoteVideo.muted = true;
@@ -722,6 +705,9 @@ socket.on('webrtc-offer', async ({ senderId, sdp }) => {
       if (playPromise !== undefined) {
         playPromise.then(() => {
           if (btnPlayPause) btnPlayPause.innerHTML = ICON_PAUSE;
+          if (remoteVideo.videoWidth > 0) {
+            streamPlaceholder.classList.add('hidden');
+          }
           // Tenta desmutar caso o navegador permita
           remoteVideo.muted = false;
           updateMuteUI();
@@ -744,36 +730,65 @@ socket.on('webrtc-offer', async ({ senderId, sdp }) => {
       }
     };
 
-    await viewerPeerConn.setRemoteDescription(new RTCSessionDescription({
-      type: sdp.type,
-      sdp: preferVP8InSdp(sdp.sdp)
-    }));
+    viewerPeerConn.oniceconnectionstatechange = () => {
+      const state = viewerPeerConn.iceConnectionState;
+      console.log(`[Viewer] ICE state: ${state}`);
+      if (state === 'connected' || state === 'completed') {
+        console.log('[Viewer] Conexão P2P com streamer estabelecida com sucesso!');
+      } else if (state === 'failed') {
+        console.warn('[Viewer] Conexão ICE falhou. Solicitando reinício de oferta...');
+        socket.emit('request-offer');
+      }
+    };
 
-    // Processar fila de ICE candidates
-    while (viewerIceQueue.length > 0) {
-      const candidate = viewerIceQueue.shift();
-      await viewerPeerConn.addIceCandidate(new RTCIceCandidate(candidate));
+    viewerPeerConn.onconnectionstatechange = () => {
+      console.log(`[Viewer] Connection state: ${viewerPeerConn.connectionState}`);
+      if (viewerPeerConn.connectionState === 'failed') {
+        socket.emit('request-offer');
+      }
+    };
+
+    await viewerPeerConn.setRemoteDescription(new RTCSessionDescription(sdp));
+
+    // Processar fila de ICE candidates recebidos antes ou durante o setRemoteDescription
+    const pendingCandidates = viewerIceQueue.splice(0, viewerIceQueue.length);
+    for (const c of pendingCandidates) {
+      await addIceCandidateSafely(viewerPeerConn, c, 'Viewer');
     }
 
     configurePeerVideoCapabilities(viewerPeerConn);
 
     // Criar resposta
     const answer = await viewerPeerConn.createAnswer();
-    const modifiedAnswer = new RTCSessionDescription({
-      type: answer.type,
-      sdp: preferVP8InSdp(answer.sdp)
-    });
-    await viewerPeerConn.setLocalDescription(modifiedAnswer);
+    await viewerPeerConn.setLocalDescription(answer);
 
     socket.emit('webrtc-answer', {
       targetId: senderId,
       sdp: viewerPeerConn.localDescription
     });
+    console.log('[Viewer] Resposta WebRTC enviada com sucesso para o Broadcaster');
 
   } catch (err) {
     console.error('[Viewer] Erro ao aceitar oferta WebRTC:', err);
   }
 });
+
+// Eventos de detecção de vídeo no elemento
+if (remoteVideo) {
+  remoteVideo.addEventListener('loadedmetadata', () => {
+    console.log(`[Viewer] Resolução de vídeo: ${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`);
+    if (remoteVideo.videoWidth > 0) {
+      streamPlaceholder.classList.add('hidden');
+      liveBadge.classList.remove('offline');
+      liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
+    }
+  });
+
+  remoteVideo.addEventListener('playing', () => {
+    console.log('[Viewer] Vídeo está rodando ativamente.');
+    streamPlaceholder.classList.add('hidden');
+  });
+}
 
 // Controles do reprodutor de vídeo
 if (btnPlayPause) {

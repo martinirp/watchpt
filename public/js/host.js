@@ -325,11 +325,7 @@ async function setupPeerConnection(viewerId) {
 
     // Criar oferta e enviar
     const offer = await pc.createOffer();
-    const modifiedOffer = new RTCSessionDescription({
-      type: offer.type,
-      sdp: preferVP8InSdp(offer.sdp)
-    });
-    await pc.setLocalDescription(modifiedOffer);
+    await pc.setLocalDescription(offer);
 
     socket.emit('webrtc-offer', {
       targetId: viewerId,
@@ -353,14 +349,10 @@ socket.on('webrtc-answer', async ({ senderId, sdp }) => {
 
       // Agora que temos remote description, despejar ICE candidates enfileirados
       const queued = iceCandidateQueues.get(senderId) || [];
-      for (const candidate of queued) {
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(candidate));
-        } catch (e) {
-          console.warn('[Host] Erro ao adicionar ICE candidate da fila:', e);
-        }
-      }
       iceCandidateQueues.set(senderId, []);
+      for (const candidate of queued) {
+        await addIceCandidateSafely(pc, candidate, 'Host');
+      }
       console.log(`[Host] ${queued.length} ICE candidate(s) da fila processados para ${senderId}`);
     } catch (err) {
       console.error('Erro ao definir remote description no host:', err);
@@ -379,13 +371,8 @@ socket.on('webrtc-ice-candidate', async ({ senderId, candidate }) => {
     queue.push(candidate);
     iceCandidateQueues.set(senderId, queue);
     console.log(`[Host] ICE candidate enfileirado para ${senderId} (sem remote desc ainda)`);
-    return;
-  }
-
-  try {
-    await pc.addIceCandidate(new RTCIceCandidate(candidate));
-  } catch (err) {
-    console.error('Erro ao adicionar ICE Candidate no host:', err);
+  } else {
+    await addIceCandidateSafely(pc, candidate, 'Host');
   }
 });
 

@@ -9,7 +9,7 @@ const RTC_CONFIG = {
 
 // ─── Otimizações WebRTC e Codecs ─────────────────────────────
 
-// Configura prioridade de codecs no PeerConnection (prioriza VP8 para evitar tela preta no Linux/Windows/Android)
+// Configura prioridade de codecs no PeerConnection (prioriza VP8 via API nativa W3C sem quebrar o SDP)
 function configurePeerVideoCapabilities(pc) {
   try {
     if (typeof RTCRtpSender.getCapabilities === 'function') {
@@ -19,9 +19,14 @@ function configurePeerVideoCapabilities(pc) {
         const otherCodecs = caps.codecs.filter(c => c.mimeType.toLowerCase() !== 'video/vp8');
         const preferred = [...vp8Codecs, ...otherCodecs];
         pc.getTransceivers().forEach(tr => {
-          if (tr.sender && tr.sender.track && tr.sender.track.kind === 'video') {
-            if (typeof tr.setCodecPreferences === 'function') {
+          const isVideo = (tr.sender && tr.sender.track && tr.sender.track.kind === 'video') ||
+                          (tr.receiver && tr.receiver.track && tr.receiver.track.kind === 'video') ||
+                          (tr.mid && tr.mid.includes('video'));
+          if (isVideo && typeof tr.setCodecPreferences === 'function') {
+            try {
               tr.setCodecPreferences(preferred);
+            } catch (err) {
+              console.warn('[WebRTC] setCodecPreferences warning:', err.message);
             }
           }
         });
@@ -32,30 +37,18 @@ function configurePeerVideoCapabilities(pc) {
   }
 }
 
-// Fallback robusto no SDP para garantir o codec VP8 no topo de m=video
-function preferVP8InSdp(sdp) {
-  if (!sdp || typeof sdp !== 'string') return sdp;
-  const lines = sdp.split('\r\n');
-  const mVideoIndex = lines.findIndex(l => l.startsWith('m=video '));
-  if (mVideoIndex === -1) return sdp;
-
-  let vp8Payload = null;
-  for (const line of lines) {
-    const match = line.match(/^a=rtpmap:(\d+)\s+VP8\/90000/i);
-    if (match) {
-      vp8Payload = match[1];
-      break;
+// Adiciona ICE Candidate de forma segura sem crashar a execução
+async function addIceCandidateSafely(pc, candidate, role = 'WebRTC') {
+  if (!candidate || !candidate.candidate) return;
+  try {
+    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+  } catch (err) {
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch (e) {
+      console.warn(`[${role}] Erro ao adicionar ICE candidate:`, e.message);
     }
   }
-
-  if (!vp8Payload) return sdp;
-
-  const mParts = lines[mVideoIndex].split(' ');
-  const header = mParts.slice(0, 3);
-  const payloads = mParts.slice(3).filter(p => p !== vp8Payload);
-  lines[mVideoIndex] = [...header, vp8Payload, ...payloads].join(' ');
-
-  return lines.join('\r\n');
 }
 
 // Otimização de parâmetros do sender (controle de bitrate e degradação suave de framerate)
