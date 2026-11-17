@@ -6,9 +6,6 @@ const os         = require('os');
 const path       = require('path');
 const fs         = require('fs');
 const crypto     = require('crypto');
-const net        = require('net');
-const { spawn }   = require('child_process');
-const { AccessToken, RoomServiceClient } = require('livekit-server-sdk');
 
 const app = express();
 let server = null;
@@ -85,150 +82,9 @@ function getSession(token) {
   return token ? sessions[token] : null;
 }
 
-// ─── LiveKit (SFU de mídia) ────────────────────────────────
-// O LiveKit recebe o vídeo do streamer UMA vez e distribui para todos os
-// espectadores, com qualidade adaptativa e reconexão automática.
-const LK_DIR       = path.join(__dirname, 'livekit');
-const LK_EXE       = path.join(LK_DIR, process.platform === 'win32' ? 'livekit-server.exe' : 'livekit-server');
-const LK_CONF_FILE = path.join(LK_DIR, 'livekit.yaml');
-const LK_KEYS_FILE = path.join(DATA_DIR, 'livekit.json');
-const LK_PORT      = parseInt(process.env.LK_PORT, 10) || 7880;  // sinalização (somente localhost, via proxy /lk)
-const LK_TCP_PORT  = parseInt(process.env.LK_TCP_PORT, 10) || 7881; // mídia TCP (fallback)
-const LK_UDP_PORT  = parseInt(process.env.LK_UDP_PORT, 10) || 7882; // mídia UDP (principal)
-
-function loadLkKeys() {
-  try {
-    const k = JSON.parse(fs.readFileSync(LK_KEYS_FILE, 'utf8'));
-    if (k.apiKey && k.apiSecret) return k;
-  } catch (e) {}
-  const k = {
-    apiKey: 'streamhub',
-    apiSecret: crypto.randomBytes(32).toString('hex')
-  };
-  fs.writeFileSync(LK_KEYS_FILE, JSON.stringify(k, null, 2));
-  return k;
-}
-const LK_KEYS = loadLkKeys();
-const lkRooms = new RoomServiceClient(`http://127.0.0.1:${LK_PORT}`, LK_KEYS.apiKey, LK_KEYS.apiSecret);
-
-let lkProcess = null;
-let lkStopping = false;
-
-function startLiveKit() {
-  if (!fs.existsSync(LK_EXE)) {
-    console.error(`[LiveKit] ❌ Binário não encontrado em ${LK_EXE}`);
-    return;
-  }
-  const conf = [
-    `port: ${LK_PORT}`,
-    `bind_addresses:`,
-    `  - "127.0.0.1"`,
-    `rtc:`,
-    `  tcp_port: ${LK_TCP_PORT}`,
-    `  udp_port: ${LK_UDP_PORT}`,
-    `  use_external_ip: true`,
-    `  congestion_control:`,
-    `    enabled: true`,
-    `    allow_pause: false`,
-    `room:`,
-    `  auto_create: true`,
-    `  empty_timeout: 30`,
-    `  departure_timeout: 20`,
-    `keys:`,
-    `  ${LK_KEYS.apiKey}: ${LK_KEYS.apiSecret}`,
-    `logging:`,
-    `  level: warn`,
-    ''
-  ].join('\n');
-  fs.writeFileSync(LK_CONF_FILE, conf);
-
-  lkProcess = spawn(LK_EXE, ['--config', LK_CONF_FILE], { stdio: 'inherit', windowsHide: true });
-  console.log(`[LiveKit] Servidor de mídia iniciado (PID ${lkProcess.pid}) — UDP ${LK_UDP_PORT} / TCP ${LK_TCP_PORT}`);
-  lkProcess.on('exit', (code) => {
-    lkProcess = null;
-    if (lkStopping) return;
-    console.warn(`[LiveKit] Encerrou (code ${code}). Reiniciando em 2s...`);
-    setTimeout(startLiveKit, 2000);
-  });
-}
-
-function stopLiveKit() {
-  lkStopping = true;
-  if (lkProcess) { try { lkProcess.kill(); } catch (e) {} }
-}
-process.on('exit', stopLiveKit);
-process.on('SIGINT',  () => { stopLiveKit(); process.exit(0); });
-
-// Sala LiveKit de cada streamer (estável mesmo se o socket reconectar)
-function lkRoomFor(userId) {
-  return `live-${userId}`;
-}
-
-async function makeLkToken({ identity, name, room, publish }) {
-  const at = new AccessToken(LK_KEYS.apiKey, LK_KEYS.apiSecret, {
-    identity,
-    name,
-    ttl: '6h'
-  });
-  at.addGrant({
-    room,
-    roomJoin: true,
-    canPublish: !!publish,
-    canPublishData: false,
-    canSubscribe: !publish
-  });
-  return await at.toJwt();
-}
-
 // ─── Middlewares ───────────────────────────────────────────
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/vendor/livekit-client.js', (req, res) => {
-  res.sendFile(path.join(__dirname, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js'));
-});
-
-// Proxy HTTP /lk/* -> LiveKit (usado pelo client em /rtc/validate)
-app.use('/lk', (req, res) => {
-  const upstream = http.request({
-    host: '127.0.0.1', port: LK_PORT, path: req.url || '/', method: req.method,
-    headers: { ...req.headers, host: `127.0.0.1:${LK_PORT}` }
-  }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
-  upstream.on('error', () => { if (!res.headersSent) res.status(502).end('LiveKit indisponível'); });
-  req.pipe(upstream);
-});
-
-// Token LiveKit: streamer (publicar) ou espectador (assistir uma live)
-app.post('/api/lk-token', async (req, res) => {
-  const token = (req.headers.authorization || '').replace('Bearer ', '').trim();
-  const session = getSession(token);
-  if (!session) return res.status(401).json({ error: 'Não autenticado.' });
-
-  try {
-    const { role, streamId } = req.body || {};
-    if (role === 'publish') {
-      const jwt = await makeLkToken({
-        identity: `pub-${session.userId}`,
-        name: session.username,
-        room: lkRoomFor(session.userId),
-        publish: true
-      });
-      return res.json({ token: jwt, room: lkRoomFor(session.userId) });
-    }
-
-    const st = streams.get(streamId);
-    if (!st) return res.status(404).json({ error: 'Live não encontrada.' });
-    const jwt = await makeLkToken({
-      identity: `v-${session.userId}-${crypto.randomBytes(3).toString('hex')}`,
-      name: session.username,
-      room: st.room,
-      publish: false
-    });
-    res.json({ token: jwt, room: st.room });
-  } catch (e) {
-    console.error('[LiveKit] Erro ao gerar token:', e.message);
-    res.status(500).json({ error: 'Falha ao gerar token de mídia.' });
-  }
-});
 
 // ─── Auth endpoints ────────────────────────────────────────
 app.post('/api/register', (req, res) => {
@@ -460,7 +316,7 @@ function setupSocketIo() {
       title: (info && info.title) || 'Transmissão ao Vivo',
       type: (info && info.type) || 'screen',
       startedAt: Date.now(),
-      room: lkRoomFor(session.userId),
+      room: `live-${session.userId}`,
       viewers: new Map()
     };
     // Se o mesmo usuário já tinha uma live ativa (aba antiga), encerra a antiga
