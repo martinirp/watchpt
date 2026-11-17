@@ -303,13 +303,24 @@
       this.pc = pc;
       const remoteStream = new MediaStream();
 
+      const onVideoReady = () => {
+        if (attempt !== this.attempt) return;
+        if (this.video.videoWidth > 0 && this.h.onPlaying) {
+          this.h.onPlaying();
+        }
+      };
+      this.video.onloadeddata = onVideoReady;
+      this.video.onplaying = onVideoReady;
+      this.video.onresize = onVideoReady;
+
       pc.ontrack = (e) => {
         if (attempt !== this.attempt) return;
-        if (e.streams && e.streams[0]) {
-          this.video.srcObject = e.streams[0];
-        } else {
+        const target = (e.streams && e.streams[0]) ? e.streams[0] : remoteStream;
+        if (target === remoteStream) {
           remoteStream.addTrack(e.track);
-          this.video.srcObject = remoteStream;
+        }
+        if (this.video.srcObject !== target) {
+          this.video.srcObject = target;
         }
         this.lastFrames = 0;
         this.lastFramesAt = Date.now();
@@ -322,9 +333,18 @@
         }
       };
 
+      pc.oniceconnectionstatechange = () => {
+        if (attempt !== this.attempt) return;
+        console.log('[P2P Viewer] ICE state:', pc.iceConnectionState);
+        if (pc.iceConnectionState === 'checking') {
+          this.h.onStatus && this.h.onStatus('Negociando rota P2P (ICE)...', 'info');
+        }
+      };
+
       pc.onconnectionstatechange = () => {
         if (attempt !== this.attempt) return;
         const st = pc.connectionState;
+        console.log('[P2P Viewer] Connection state:', st);
         if (st === 'connected') {
           this.quality = ConnectionQuality.Good;
           this.h.onStatus && this.h.onStatus('Conectado (P2P Direto)', 'ok');
@@ -334,12 +354,12 @@
           this.h.onStatus && this.h.onStatus('Reconectando P2P...', 'info');
         } else if (st === 'failed') {
           this.quality = ConnectionQuality.Lost;
-          this.h.onStatus && this.h.onStatus('Conexão P2P falhou. Tentando novamente...', 'info');
+          this.h.onStatus && this.h.onStatus('Conexão P2P bloqueada pelo NAT/rede (precisa de TURN). Tentando novamente...', 'error');
           setTimeout(() => {
             if (attempt === this.attempt && this.streamId && s && s.connected) {
               s.emit('rtc-ready', { to: this.streamId });
             }
-          }, 1500);
+          }, 2000);
         }
       };
 
