@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WatchPT Direct — Transmissor P2P</title>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --surface: #131823;
+      --surface2: #1b2232;
+      --border: #263044;
+      --text: #e6edf7;
+      --dim: #8b9bb4;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --success: #22c55e;
+      --danger: #ef4444;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 16px;
+    }
+    .brand span.badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(59, 130, 246, 0.16);
+      color: #60a5fa;
+      border: 1px solid rgba(59, 130, 246, 0.35);
+    }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      background: var(--bg);
+      padding: 4px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .tab-btn {
+      border: none;
+      background: transparent;
+      color: var(--dim);
+      padding: 7px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 13px;
+      transition: 0.15s;
+    }
+    .tab-btn.active {
+      background: var(--accent);
+      color: #fff;
+    }
+    main {
+      flex: 1;
+      max-width: 1100px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .panel { display: none; flex-direction: column; gap: 16px; }
+    .panel.active { display: flex; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    label.field {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      font-size: 12px;
+      color: var(--dim);
+      flex: 1;
+      min-width: 180px;
+    }
+    input[type="text"], select {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 9px 11px;
+      font-size: 13px;
+      outline: none;
+    }
+    input[type="text"]:focus, select:focus {
+      border-color: var(--accent);
+    }
+    .btn {
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      padding: 9px 15px;
+      border-radius: 7px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: 0.15s;
+    }
+    .btn:hover:not(:disabled) { filter: brightness(1.15); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+    .btn-success { background: var(--success); border-color: var(--success); color: #052e16; }
+    .video-wrap {
+      position: relative;
+      background: #000;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      aspect-ratio: 16 / 9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+    }
+    .video-placeholder {
+      position: absolute;
+      color: var(--dim);
+      font-size: 14px;
+      text-align: center;
+      padding: 20px;
+      pointer-events: none;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--dim);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--dim);
+    }
+    .dot.live { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+    .dot.ok { background: var(--success); box-shadow: 0 0 8px var(--success); }
+    .dot.wait { background: var(--warn); }
+    .share-box {
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+      background: rgba(34, 197, 94, 0.07);
+      border: 1px solid rgba(34, 197, 94, 0.35);
+      border-radius: 8px;
+    }
+    .share-box.show { display: flex; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .hint { font-size: 12px; color: var(--dim); line-height: 1.45; }
+    #filePickerInput { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span>📡 WatchPT Direct</span>
+      <span class="badge">P2P · Sem Servidor</span>
+    </div>
+    <div class="tabs">
+      <button class="tab-btn active" id="tabBroadcastBtn">📡 Transmitir</button>
+      <button class="tab-btn" id="tabWatchBtn">📺 Assistir</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ═══════════════ PAINEL TRANSMITIR ═══════════════ -->
+    <section id="broadcastPanel" class="panel active">
+      <div class="card">
+        <div class="row">
+          <label class="field">
+            <span>Fonte da Transmissão</span>
+            <select id="sourceSelect">
+              <option value="screen">🖥 Tela / Janela / Jogo (com áudio)</option>
+              <option value="camera">📷 Câmera + Microfone</option>
+              <option value="file">🎬 Arquivo de Vídeo (MP4 / WebM / MKV)</option>
+            </select>
+          </label>
+          <label class="field" style="max-width: 210px;">
+            <span>Qualidade (Tela)</span>
+            <select id="qualitySelect">
+              <option value="1080p60">1080p · 60 FPS</option>
+              <option value="1080p30" selected>1080p · 30 FPS</option>
+              <option value="720p60">720p · 60 FPS</option>
+              <option value="720p30">720p · 30 FPS</option>
+            </select>
+          </label>
+          <label class="field" style="max-width: 230px;">
+            <span>Código da Sala (opcional)</span>
+            <input type="text" id="customRoomInput" class="mono" placeholder="Auto (ex: live-8f3k2a)" />
+          </label>
+        </div>
+
+        <input type="file" id="filePickerInput" accept="video/*" />
+
+        <div class="row" style="justify-content: space-between;">
+          <div class="row">
+            <button class="btn btn-primary" id="startBroadcastBtn">▶ Iniciar Transmissão</button>
+            <button class="btn btn-danger" id="stopBroadcastBtn" disabled>⏹ Parar</button>
+          </div>
+          <div class="row">
+            <span class="status-pill"><span class="dot" id="broadcasterDot"></span><span id="broadcasterStatus">Pronto para transmitir</span></span>
+            <span class="status-pill">👥 <strong id="viewerCount">0</strong> assistindo</span>
+          </div>
+        </div>
+
+        <div class="share-box" id="shareBox">
+          <div class="row">
+            <label class="field">
+              <span>🔗 Link Direto (para abrir em outro lugar)</span>
+              <input type="text" id="shareLinkInput" class="mono" readonly />
+            </label>
+            <button class="btn btn-success" id="copyLinkBtn" style="align-self: flex-end;">📋 Copiar Link</button>
+          </div>
+          <div class="row">
+            <label class="field">
+              <span>🔑 Código da Sala (se abrir o HTML local em outro PC, cole este código na aba Assistir)</span>
+              <input type="text" id="shareCodeInput" class="mono" readonly />
+            </label>
+            <button class="btn" id="copyCodeBtn" style="align-self: flex-end;">📋 Copiar Código</button>
+          </div>
+          <p class="hint" id="fileOriginHint" style="display:none; color:#fbbf24;">
+            ⚠️ Você abriu este arquivo via <code>file://</code>. Para enviar um link clicável pela internet, hospede este arquivo <code>direct.html</code> (ex: GitHub Pages / Cloudflare Pages) ou envie o arquivo + o <strong>Código da Sala</strong> acima.
+          </p>
+        </div>
+      </div>
+
+      <div class="video-wrap">
+        <video id="localPreview" autoplay muted playsinline></video>
+        <div class="video-placeholder" id="localPlaceholder">Pré-visualização da sua transmissão aparecerá aqui</div>
+      </div>
+    </section>
+
+    <!-- ═══════════════ PAINEL ASSISTIR ═══════════════ -->
+    <section id="watchPanel" class="panel">
+      <div class="card">
+        <div class="row">
+          <label class="field">
+            <span>Código da Sala ou Link Completo</span>
+            <input type="text" id="watchInput" class="mono" placeholder="Cole o código (ex: live-8f3k2a) ou o link ?watch=..." />
+          </label>
+          <button class="btn btn-primary" id="connectWatchBtn" style="align-self: flex-end;">▶ Assistir</button>
+          <button class="btn btn-danger" id="disconnectWatchBtn" style="align-self: flex-end;" disabled>⏹ Desconectar</button>
+        </div>
+        <div class="row" style="justify-content: space-between;">
+          <span class="status-pill"><span class="dot" id="watchDot"></span><span id="watchStatus">Aguardando código da sala</span></span>
+          <div class="row">
+            <button class="btn" id="pipBtn" disabled>🗔 Picture-in-Picture</button>
+            <button class="btn" id="fullscreenBtn" disabled>⛶ Tela Cheia</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="video-wrap">
+        <video id="remoteVideo" autoplay playsinline controls></video>
+        <div class="video-placeholder" id="remotePlaceholder">Cole o código ou abra o link da live para assistir</div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // ─── Config STUN pública para atravessar NAT em P2P ────────────
+    const PEER_CONFIG = {
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' }
+        ]
+      }
+    };
+
+    // ─── Navegação entre Abas ─────────────────────────────────────
+    const tabBroadcastBtn = document.getElementById('tabBroadcastBtn');
+    const tabWatchBtn = document.getElementById('tabWatchBtn');
+    const broadcastPanel = document.getElementById('broadcastPanel');
+    const watchPanel = document.getElementById('watchPanel');
+
+    function switchTab(mode) {
+      const isBroadcast = mode === 'broadcast';
+      tabBroadcastBtn.classList.toggle('active', isBroadcast);
+      tabWatchBtn.classList.toggle('active', !isBroadcast);
+      broadcastPanel.classList.toggle('active', isBroadcast);
+      watchPanel.classList.toggle('active', !isBroadcast);
+    }
+
+    tabBroadcastBtn.addEventListener('click', () => switchTab('broadcast'));
+    tabWatchBtn.addEventListener('click', () => switchTab('watch'));
+
+    // ─── Estado do Transmissor ────────────────────────────────────
+    let hostPeer = null;
+    let localStream = null;
+    let fileVideoEl = null;
+    const activeCalls = new Map(); // peerId -> MediaConnection
+
+    const sourceSelect = document.getElementById('sourceSelect');
+    const qualitySelect = document.getElementById('qualitySelect');
+    const customRoomInput = document.getElementById('customRoomInput');
+    const filePickerInput = document.getElementById('filePickerInput');
+    const startBroadcastBtn = document.getElementById('startBroadcastBtn');
+    const stopBroadcastBtn = document.getElementById('stopBroadcastBtn');
+    const broadcasterDot = document.getElementById('broadcasterDot');
+    const broadcasterStatus = document.getElementById('broadcasterStatus');
+    const viewerCountEl = document.getElementById('viewerCount');
+    const shareBox = document.getElementById('shareBox');
+    const shareLinkInput = document.getElementById('shareLinkInput');
+    const shareCodeInput = document.getElementById('shareCodeInput');
+    const fileOriginHint = document.getElementById('fileOriginHint');
+    const localPreview = document.getElementById('localPreview');
+    const localPlaceholder = document.getElementById('localPlaceholder');
+
+    function setBroadcasterState(dotClass, text) {
+      broadcasterDot.className = 'dot ' + (dotClass || '');
+      broadcasterStatus.textContent = text;
+    }
+
+    function updateViewerCount() {
+      viewerCountEl.textContent = String(activeCalls.size);
+    }
+
+    function generateRoomId() {
+      const raw = customRoomInput.value.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+      if (raw) return raw;
+      return 'live-' + Math.random().toString(36).slice(2, 8);
+    }
+
+    function getScreenConstraints() {
+      const q = qualitySelect.value;
+      const map = {
+        '1080p60': { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60, max: 60 } },
+        '1080p30': { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
+        '720p60':  { width: { ideal: 1280 }, height: { ideal: 720 },  frameRate: { ideal: 60, max: 60 } },
+        '720p30':  { width: { ideal: 1280 }, height: { ideal: 720 },  frameRate: { ideal: 30, max: 30 } }
+      };
+      return map[q] || map['1080p30'];
+    }
+
+    function pickFileStream() {
+      return new Promise((resolve, reject) => {
+        filePickerInput.value = '';
+        filePickerInput.onchange = async () => {
+          const file = filePickerInput.files && filePickerInput.files[0];
+          if (!file) return reject(new Error('Nenhum arquivo selecionado.'));
+          const url = URL.createObjectURL(file);
+          fileVideoEl = document.createElement('video');
+          fileVideoEl.src = url;
+          fileVideoEl.loop = true;
+          fileVideoEl.playsInline = true;
+          fileVideoEl.muted = false;
+          await fileVideoEl.play();
+          const stream = fileVideoEl.captureStream ? fileVideoEl.captureStream() : fileVideoEl.mozCaptureStream();
+          resolve(stream);
+        };
+        filePickerInput.click();
+      });
+    }
+
+    async function captureSelectedSource() {
+      const src = sourceSelect.value;
+      if (src === 'screen') {
+        return await navigator.mediaDevices.getDisplayMedia({
+          video: getScreenConstraints(),
+          audio: true
+        });
+      }
+      if (src === 'camera') {
+        return await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: true
+        });
+      }
+      if (src === 'file') {
+        return await pickFileStream();
+      }
+      throw new Error('Fonte inválida.');
+    }
+
+    function stopBroadcast() {
+      activeCalls.forEach(call => { try { call.close(); } catch (e) {} });
+      activeCalls.clear();
+      updateViewerCount();
+
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop());
+        localStream = null;
+      }
+      if (fileVideoEl) {
+        fileVideoEl.pause();
+        if (fileVideoEl.src) URL.revokeObjectURL(fileVideoEl.src);
+        fileVideoEl = null;
+      }
+      if (hostPeer) {
+        try { hostPeer.destroy(); } catch (e) {}
+        hostPeer = null;
+      }
+
+      localPreview.srcObject = null;
+      localPlaceholder.style.display = 'block';
+      shareBox.classList.remove('show');
+      startBroadcastBtn.disabled = false;
+      stopBroadcastBtn.disabled = true;
+      setBroadcasterState('', 'Transmissão encerrada');
+    }
+
+    startBroadcastBtn.addEventListener('click', async () => {
+      try {
+        startBroadcastBtn.disabled = true;
+        setBroadcasterState('wait', 'Capturando mídia...');
+        localStream = await captureSelectedSource();
+
+        // Se o usuário clicar em "Parar compartilhamento" do navegador
+        const vTrack = localStream.getVideoTracks()[0];
+        if (vTrack) {
+          vTrack.onended = () => stopBroadcast();
+        }
+
+        localPreview.srcObject = localStream;
+        localPlaceholder.style.display = 'none';
+
+        const roomId = generateRoomId();
+        setBroadcasterState('wait', 'Registrando sala P2P...');
+
+        hostPeer = new Peer(roomId, PEER_CONFIG);
+
+        hostPeer.on('open', (id) => {
+          setBroadcasterState('live', 'AO VIVO (P2P)');
+          stopBroadcastBtn.disabled = false;
+
+          const baseUrl = window.location.href.split('?')[0].split('#')[0];
+          const watchUrl = `${baseUrl}?watch=${encodeURIComponent(id)}`;
+          shareLinkInput.value = watchUrl;
+          shareCodeInput.value = id;
+          shareBox.classList.add('show');
+          fileOriginHint.style.display = window.location.protocol === 'file:' ? 'block' : 'none';
+        });
+
+        // Quando um espectador conecta no DataChannel, o transmissor envia o stream
+        hostPeer.on('connection', (conn) => {
+          const viewerId = conn.peer;
+          conn.on('open', () => {
+            if (!localStream || !hostPeer) return;
+            const call = hostPeer.call(viewerId, localStream);
+            if (!call) return;
+            activeCalls.set(viewerId, call);
+            updateViewerCount();
+
+            const cleanup = () => {
+              activeCalls.delete(viewerId);
+              updateViewerCount();
+            };
+            call.on('close', cleanup);
+            call.on('error', cleanup);
+            conn.on('close', cleanup);
+          });
+        });
+
+        hostPeer.on('error', (err) => {
+          console.error('Peer error:', err);
+          setBroadcasterState('', `Erro: ${err.type || err.message}`);
+          if (err.type === 'unavailable-id') {
+            alert('Esse código de sala já está em uso. Escolha outro ou deixe em branco.');
+            stopBroadcast();
+          }
+        });
+      } catch (err) {
+        console.error(err);
+        alert('Não foi possível iniciar a transmissão: ' + (err.message || err));
+        stopBroadcast();
+      }
+    });
+
+    stopBroadcastBtn.addEventListener('click', stopBroadcast);
+
+    function copyText(inputEl, btnEl, label) {
+      navigator.clipboard.writeText(inputEl.value).then(() => {
+        const prev = btnEl.textContent;
+        btnEl.textContent = '✅ Copiado!';
+        setTimeout(() => (btnEl.textContent = prev), 1500);
+      });
+    }
+    document.getElementById('copyLinkBtn').addEventListener('click', (e) => copyText(shareLinkInput, e.target));
+    document.getElementById('copyCodeBtn').addEventListener('click', (e) => copyText(shareCodeInput, e.target));
+
+    // ─── Estado do Espectador ─────────────────────────────────────
+    let watchPeer = null;
+    let watchConn = null;
+    let watchCall = null;
+
+    const watchInput = document.getElementById('watchInput');
+    const connectWatchBtn = document.getElementById('connectWatchBtn');
+    const disconnectWatchBtn = document.getElementById('disconnectWatchBtn');
+    const watchDot = document.getElementById('watchDot');
+    const watchStatus = document.getElementById('watchStatus');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const remotePlaceholder = document.getElementById('remotePlaceholder');
+    const pipBtn = document.getElementById('pipBtn');
+    const fullscreenBtn = document.getElementById('fullscreenBtn');
+
+    function setWatchState(dotClass, text) {
+      watchDot.className = 'dot ' + (dotClass || '');
+      watchStatus.textContent = text;
+    }
+
+    function extractRoomId(raw) {
+      const txt = (raw || '').trim();
+      if (!txt) return '';
+      try {
+        if (txt.includes('watch=')) {
+          const u = new URL(txt);
+          return u.searchParams.get('watch') || '';
+        }
+      } catch (e) {
+        const m = txt.match(/[?&]watch=([^&#]+)/);
+        if (m) return decodeURIComponent(m[1]);
+      }
+      return txt;
+    }
+
+    function disconnectWatch() {
+      if (watchCall) { try { watchCall.close(); } catch (e) {} watchCall = null; }
+      if (watchConn) { try { watchConn.close(); } catch (e) {} watchConn = null; }
+      if (watchPeer) { try { watchPeer.destroy(); } catch (e) {} watchPeer = null; }
+      remoteVideo.srcObject = null;
+      remotePlaceholder.style.display = 'block';
+      connectWatchBtn.disabled = false;
+      disconnectWatchBtn.disabled = true;
+      pipBtn.disabled = true;
+      fullscreenBtn.disabled = true;
+      setWatchState('', 'Desconectado');
+    }
+
+    function connectToRoom(rawInput) {
+      const targetId = extractRoomId(rawInput);
+      if (!targetId) {
+        alert('Informe o código da sala ou o link com ?watch=...');
+        return;
+      }
+
+      disconnectWatch();
+      connectWatchBtn.disabled = true;
+      disconnectWatchBtn.disabled = false;
+      setWatchState('wait', `Conectando à sala "${targetId}"...`);
+
+      watchPeer = new Peer(PEER_CONFIG);
+
+      watchPeer.on('open', () => {
+        watchConn = watchPeer.connect(targetId, { reliable: true });
+        watchConn.on('open', () => {
+          setWatchState('wait', 'Aguardando vídeo do transmissor...');
+        });
+        watchConn.on('close', () => {
+          setWatchState('', 'Transmissor encerrou a live');
+        });
+        watchConn.on('error', (err) => {
+          setWatchState('', 'Erro na conexão: ' + (err.message || err));
+        });
+      });
+
+      watchPeer.on('call', (call) => {
+        watchCall = call;
+        call.answer(); // Espectador não precisa enviar câmera/mic
+        call.on('stream', (stream) => {
+          remoteVideo.srcObject = stream;
+          remotePlaceholder.style.display = 'none';
+          pipBtn.disabled = false;
+          fullscreenBtn.disabled = false;
+          setWatchState('ok', `Assistindo ao vivo (${targetId})`);
+          remoteVideo.play().catch(() => {});
+        });
+        call.on('close', () => {
+          setWatchState('', 'Transmissão finalizada');
+        });
+      });
+
+      watchPeer.on('error', (err) => {
+        console.error('Watch peer error:', err);
+        setWatchState('', `Erro: ${err.type === 'peer-unavailable' ? 'Sala não encontrada ou offline' : (err.type || err.message)}`);
+        connectWatchBtn.disabled = false;
+      });
+    }
+
+    connectWatchBtn.addEventListener('click', () => connectToRoom(watchInput.value));
+    disconnectWatchBtn.addEventListener('click', disconnectWatch);
+    watchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') connectToRoom(watchInput.value);
+    });
+
+    pipBtn.addEventListener('click', async () => {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else if (remoteVideo.requestPictureInPicture) {
+        await remoteVideo.requestPictureInPicture();
+      }
+    });
+
+    fullscreenBtn.addEventListener('click', () => {
+      if (remoteVideo.requestFullscreen) remoteVideo.requestFullscreen();
+    });
+
+    // ─── Auto-abrir modo Assistir se vier ?watch=ID na URL ────────
+    const params = new URLSearchParams(window.location.search);
+    const watchParam = params.get('watch');
+    if (watchParam) {
+      switchTab('watch');
+      watchInput.value = watchParam;
+      connectToRoom(watchParam);
+    }
+  </script>
+</body>
+</html>
+

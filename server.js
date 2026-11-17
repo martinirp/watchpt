@@ -6,6 +6,9 @@ const os         = require('os');
 const path       = require('path');
 const fs         = require('fs');
 const crypto     = require('crypto');
+const net        = require('net');
+const { spawn }   = require('child_process');
+const { AccessToken, RoomServiceClient } = require('livekit-server-sdk');
 
 const app = express();
 let server = null;
@@ -51,16 +54,181 @@ function hashPassword(pw) {
   return crypto.createHash('sha256').update(pw + 'streamhub_s4lt_2026').digest('hex');
 }
 
-// Sessões em memória: token -> { userId, username }
-const sessions = {};
+// Sessões persistidas em disco (reiniciar o servidor não derruba o login de ninguém)
+const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+const SESSION_TTL   = 30 * 24 * 3600 * 1000;
+let sessions = {};
+try {
+  sessions = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+  const now = Date.now();
+  for (const t of Object.keys(sessions)) {
+    if (!sessions[t].createdAt || now - sessions[t].createdAt > SESSION_TTL) delete sessions[t];
+  }
+} catch (e) { sessions = {}; }
+
+let sessionsSaveTimer = null;
+function persistSessions() {
+  clearTimeout(sessionsSaveTimer);
+  sessionsSaveTimer = setTimeout(() => {
+    try { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions)); } catch (e) {}
+  }, 300);
+}
+
+function createSession(userId, username) {
+  const token = crypto.randomUUID();
+  sessions[token] = { userId, username, createdAt: Date.now() };
+  persistSessions();
+  return token;
+}
 
 function getSession(token) {
   return token ? sessions[token] : null;
 }
 
+// ─── LiveKit (SFU de mídia) ────────────────────────────────
+// O LiveKit recebe o vídeo do streamer UMA vez e distribui para todos os
+// espectadores, com qualidade adaptativa e reconexão automática.
+const LK_DIR       = path.join(__dirname, 'livekit');
+const LK_EXE       = path.join(LK_DIR, process.platform === 'win32' ? 'livekit-server.exe' : 'livekit-server');
+const LK_CONF_FILE = path.join(LK_DIR, 'livekit.yaml');
+const LK_KEYS_FILE = path.join(DATA_DIR, 'livekit.json');
+const LK_PORT      = parseInt(process.env.LK_PORT, 10) || 7880;  // sinalização (somente localhost, via proxy /lk)
+const LK_TCP_PORT  = parseInt(process.env.LK_TCP_PORT, 10) || 7881; // mídia TCP (fallback)
+const LK_UDP_PORT  = parseInt(process.env.LK_UDP_PORT, 10) || 7882; // mídia UDP (principal)
+
+function loadLkKeys() {
+  try {
+    const k = JSON.parse(fs.readFileSync(LK_KEYS_FILE, 'utf8'));
+    if (k.apiKey && k.apiSecret) return k;
+  } catch (e) {}
+  const k = {
+    apiKey: 'streamhub',
+    apiSecret: crypto.randomBytes(32).toString('hex')
+  };
+  fs.writeFileSync(LK_KEYS_FILE, JSON.stringify(k, null, 2));
+  return k;
+}
+const LK_KEYS = loadLkKeys();
+const lkRooms = new RoomServiceClient(`http://127.0.0.1:${LK_PORT}`, LK_KEYS.apiKey, LK_KEYS.apiSecret);
+
+let lkProcess = null;
+let lkStopping = false;
+
+function startLiveKit() {
+  if (!fs.existsSync(LK_EXE)) {
+    console.error(`[LiveKit] ❌ Binário não encontrado em ${LK_EXE}`);
+    return;
+  }
+  const conf = [
+    `port: ${LK_PORT}`,
+    `bind_addresses:`,
+    `  - "127.0.0.1"`,
+    `rtc:`,
+    `  tcp_port: ${LK_TCP_PORT}`,
+    `  udp_port: ${LK_UDP_PORT}`,
+    `  use_external_ip: true`,
+    `  congestion_control:`,
+    `    enabled: true`,
+    `    allow_pause: false`,
+    `room:`,
+    `  auto_create: true`,
+    `  empty_timeout: 30`,
+    `  departure_timeout: 20`,
+    `keys:`,
+    `  ${LK_KEYS.apiKey}: ${LK_KEYS.apiSecret}`,
+    `logging:`,
+    `  level: warn`,
+    ''
+  ].join('\n');
+  fs.writeFileSync(LK_CONF_FILE, conf);
+
+  lkProcess = spawn(LK_EXE, ['--config', LK_CONF_FILE], { stdio: 'inherit', windowsHide: true });
+  console.log(`[LiveKit] Servidor de mídia iniciado (PID ${lkProcess.pid}) — UDP ${LK_UDP_PORT} / TCP ${LK_TCP_PORT}`);
+  lkProcess.on('exit', (code) => {
+    lkProcess = null;
+    if (lkStopping) return;
+    console.warn(`[LiveKit] Encerrou (code ${code}). Reiniciando em 2s...`);
+    setTimeout(startLiveKit, 2000);
+  });
+}
+
+function stopLiveKit() {
+  lkStopping = true;
+  if (lkProcess) { try { lkProcess.kill(); } catch (e) {} }
+}
+process.on('exit', stopLiveKit);
+process.on('SIGINT',  () => { stopLiveKit(); process.exit(0); });
+
+// Sala LiveKit de cada streamer (estável mesmo se o socket reconectar)
+function lkRoomFor(userId) {
+  return `live-${userId}`;
+}
+
+async function makeLkToken({ identity, name, room, publish }) {
+  const at = new AccessToken(LK_KEYS.apiKey, LK_KEYS.apiSecret, {
+    identity,
+    name,
+    ttl: '6h'
+  });
+  at.addGrant({
+    room,
+    roomJoin: true,
+    canPublish: !!publish,
+    canPublishData: false,
+    canSubscribe: !publish
+  });
+  return await at.toJwt();
+}
+
 // ─── Middlewares ───────────────────────────────────────────
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+app.get('/vendor/livekit-client.js', (req, res) => {
+  res.sendFile(path.join(__dirname, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js'));
+});
+
+// Proxy HTTP /lk/* -> LiveKit (usado pelo client em /rtc/validate)
+app.use('/lk', (req, res) => {
+  const upstream = http.request({
+    host: '127.0.0.1', port: LK_PORT, path: req.url || '/', method: req.method,
+    headers: { ...req.headers, host: `127.0.0.1:${LK_PORT}` }
+  }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
+  upstream.on('error', () => { if (!res.headersSent) res.status(502).end('LiveKit indisponível'); });
+  req.pipe(upstream);
+});
+
+// Token LiveKit: streamer (publicar) ou espectador (assistir uma live)
+app.post('/api/lk-token', async (req, res) => {
+  const token = (req.headers.authorization || '').replace('Bearer ', '').trim();
+  const session = getSession(token);
+  if (!session) return res.status(401).json({ error: 'Não autenticado.' });
+
+  try {
+    const { role, streamId } = req.body || {};
+    if (role === 'publish') {
+      const jwt = await makeLkToken({
+        identity: `pub-${session.userId}`,
+        name: session.username,
+        room: lkRoomFor(session.userId),
+        publish: true
+      });
+      return res.json({ token: jwt, room: lkRoomFor(session.userId) });
+    }
+
+    const st = streams.get(streamId);
+    if (!st) return res.status(404).json({ error: 'Live não encontrada.' });
+    const jwt = await makeLkToken({
+      identity: `v-${session.userId}-${crypto.randomBytes(3).toString('hex')}`,
+      name: session.username,
+      room: st.room,
+      publish: false
+    });
+    res.json({ token: jwt, room: st.room });
+  } catch (e) {
+    console.error('[LiveKit] Erro ao gerar token:', e.message);
+    res.status(500).json({ error: 'Falha ao gerar token de mídia.' });
+  }
+});
 
 // ─── Auth endpoints ────────────────────────────────────────
 app.post('/api/register', (req, res) => {
@@ -90,8 +258,7 @@ app.post('/api/register', (req, res) => {
   };
   saveUsers(users);
 
-  const token = crypto.randomUUID();
-  sessions[token] = { userId, username: trimmed };
+  const token = createSession(userId, trimmed);
   console.log(`[Auth] Novo usuário registrado: ${trimmed}`);
 
   res.json({ token, username: trimmed });
@@ -112,8 +279,7 @@ app.post('/api/login', (req, res) => {
   if (user.password !== hashPassword(password))
     return res.status(401).json({ error: 'Senha incorreta.' });
 
-  const token = crypto.randomUUID();
-  sessions[token] = { userId, username: user.username };
+  const token = createSession(userId, user.username);
   console.log(`[Auth] Login: ${user.username}`);
 
   res.json({ token, username: user.username });
@@ -149,14 +315,13 @@ app.get('/api/network-info', (req, res) => {
 });
 
 app.get('/host', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'host.html'));
+  res.redirect('/'); // painel legado removido: o estúdio fica na página principal
 });
 
 // ─── Estado do Stream ──────────────────────────────────────
 // Cada streamer conectado pode ter a própria live (multi-stream).
 const streams = new Map();  // streamerSocketId -> { id, username, title, type, startedAt, viewers }
 const viewers = new Map();  // viewerSocketId   -> { id, username, joinedAt, watching }
-const relayInitHeaders = new Map(); // streamerSocketId -> { mimeType, chunk }
 
 function publicStreams() {
   return Array.from(streams.values())
@@ -195,7 +360,6 @@ function endStream(streamerId) {
   const st = streams.get(streamerId);
   if (!st) return;
   streams.delete(streamerId);
-  relayInitHeaders.delete(streamerId);
   st.viewers.forEach((_v, viewerId) => {
     io.to(viewerId).emit('stream-ended', { streamerId });
     const v = viewers.get(viewerId);
@@ -277,26 +441,6 @@ function setupSocketIo() {
       startedAt: st.startedAt,
       viewerCount: st.viewers.size
     });
-
-    // Enviar o cabeçalho de inicialização do relay caso já exista
-    const relayData = relayInitHeaders.get(streamerId);
-    if (relayData) {
-      socket.emit('relay-init', {
-        streamerId,
-        mimeType: relayData.mimeType,
-        chunk: relayData.chunk
-      });
-    }
-    // Notifica o streamer para gerar um keyframe inicial caso este espectador use modo Relay
-    io.to(streamerId).emit('request-keyframe');
-  });
-
-  // Permitir que o espectador peça oferta caso ainda não tenha recebido
-  socket.on('request-offer', () => {
-    const v = viewers.get(socket.id);
-    if (!v || !v.watching || !streams.has(v.watching)) return;
-    console.log(`[Signaling] Viewer ${username} solicitou oferta WebRTC`);
-    io.to(v.watching).emit('viewer-joined', { viewerId: socket.id, username });
   });
 
   // ── Registrar como streamer (aceita register-streamer e register-host) ──
@@ -316,8 +460,13 @@ function setupSocketIo() {
       title: (info && info.title) || 'Transmissão ao Vivo',
       type: (info && info.type) || 'screen',
       startedAt: Date.now(),
+      room: lkRoomFor(session.userId),
       viewers: new Map()
     };
+    // Se o mesmo usuário já tinha uma live ativa (aba antiga), encerra a antiga
+    for (const [sid, s] of streams) {
+      if (sid !== socket.id && s.room === stream.room) endStream(sid);
+    }
     streams.set(socket.id, stream);
     socket.join(streamRoom(socket.id));
     console.log(`[Stream] Iniciado por ${username}: "${stream.title}"`);
@@ -333,98 +482,6 @@ function setupSocketIo() {
     endStream(socket.id);
   });
 
-  // ── WebRTC: Oferta do Streamer ──────────────────────────
-  socket.on('webrtc-offer', ({ targetId, sdp }) => {
-    io.to(targetId).emit('webrtc-offer', { senderId: socket.id, sdp });
-  });
-
-  // ── WebRTC: Resposta do Viewer ──────────────────────────
-  socket.on('webrtc-answer', ({ targetId, sdp }) => {
-    io.to(targetId).emit('webrtc-answer', { senderId: socket.id, sdp });
-  });
-
-  // ── WebRTC: ICE Candidate ───────────────────────────────
-  socket.on('webrtc-ice-candidate', ({ targetId, candidate }) => {
-    // Repassar o candidato original
-    io.to(targetId).emit('webrtc-ice-candidate', { senderId: socket.id, candidate });
-
-    // Se o candidato for host mascarado por mDNS (.local), sintetiza também com o IP real de LAN
-    if (candidate && typeof candidate.candidate === 'string' && candidate.candidate.includes('.local')) {
-      let rawIp = socket.handshake.address || (socket.conn && socket.conn.remoteAddress) || '';
-      if (rawIp.startsWith('::ffff:')) rawIp = rawIp.substring(7);
-      if (rawIp === '::1') rawIp = '127.0.0.1';
-
-      const candidateIps = [];
-      if (/^\d+\.\d+\.\d+\.\d+$/.test(rawIp) && rawIp !== '127.0.0.1') {
-        candidateIps.push(rawIp);
-      } else {
-        // Se a conexão do host veio de 127.0.0.1 (servidor na mesma máquina), injeta os IPs locais da máquina
-        getLocalIpAddresses().forEach(item => {
-          if (item.address && !candidateIps.includes(item.address)) {
-            candidateIps.push(item.address);
-          }
-        });
-      }
-
-      for (const ip of candidateIps) {
-        const unmaskedCandidate = candidate.candidate.replace(/\s[^\s]+\.local\s/, ` ${ip} `);
-        if (unmaskedCandidate !== candidate.candidate) {
-          io.to(targetId).emit('webrtc-ice-candidate', {
-            senderId: socket.id,
-            candidate: {
-              candidate: unmaskedCandidate,
-              sdpMid: candidate.sdpMid,
-              sdpMLineIndex: candidate.sdpMLineIndex,
-              usernameFragment: candidate.usernameFragment
-            }
-          });
-        }
-      }
-    }
-  });
-
-  // ── Relay WebSocket (Modo Garantido de Streaming) ────────
-  socket.on('relay-init', ({ mimeType, chunk }) => {
-    if (!streams.has(socket.id)) return;
-    relayInitHeaders.set(socket.id, { mimeType, chunk });
-    socket.to(streamRoom(socket.id)).emit('relay-init', {
-      streamerId: socket.id,
-      mimeType,
-      chunk
-    });
-  });
-
-  socket.on('relay-chunk', (chunk) => {
-    if (!streams.has(socket.id)) return;
-    socket.to(streamRoom(socket.id)).emit('relay-chunk', {
-      streamerId: socket.id,
-      chunk
-    });
-  });
-
-  socket.on('request-relay-init', ({ streamerId } = {}) => {
-    const v = viewers.get(socket.id);
-    const target = streamerId || (v && v.watching);
-    if (!target) return;
-    const relayData = relayInitHeaders.get(target);
-    if (relayData) {
-      socket.emit('relay-init', {
-        streamerId: target,
-        mimeType: relayData.mimeType,
-        chunk: relayData.chunk
-      });
-    } else {
-      // Se ainda não temos o cabeçalho salvo, solicita ao streamer para gerar
-      io.to(target).emit('request-keyframe');
-    }
-  });
-
-  socket.on('request-keyframe', ({ streamerId } = {}) => {
-    const target = streamerId || (viewers.get(socket.id) && viewers.get(socket.id).watching);
-    if (target) {
-      io.to(target).emit('request-keyframe');
-    }
-  });
 
   // ── Sala atual (live que este socket está assistindo/transmitindo) ──
   function currentRoom() {
@@ -432,6 +489,23 @@ function setupSocketIo() {
     const v = viewers.get(socket.id);
     return v && v.watching ? streamRoom(v.watching) : null;
   }
+
+  // ── Sinalização WebRTC P2P (vídeo vai direto entre peers) ──
+  socket.on('rtc-ready', ({ to } = {}) => {
+    if (to) io.to(to).emit('rtc-ready', { viewerId: socket.id, username });
+  });
+
+  socket.on('rtc-offer', ({ to, sdp } = {}) => {
+    if (to && sdp) io.to(to).emit('rtc-offer', { from: socket.id, sdp });
+  });
+
+  socket.on('rtc-answer', ({ to, sdp } = {}) => {
+    if (to && sdp) io.to(to).emit('rtc-answer', { from: socket.id, sdp });
+  });
+
+  socket.on('rtc-ice', ({ to, candidate } = {}) => {
+    if (to && candidate) io.to(to).emit('rtc-ice', { from: socket.id, candidate });
+  });
 
   // ── Chat ────────────────────────────────────────────────
   socket.on('chat-message', (data) => {
@@ -471,26 +545,55 @@ function setupSocketIo() {
   });
 }
 
+
+// ─── Certificado HTTPS auto-assinado (persistido p/ não pedir aceite a cada reinício) ───
+async function loadOrCreateCert() {
+  const CERT_FILE = path.join(DATA_DIR, 'cert.json');
+  const ips = getLocalIpAddresses().map(i => i.address);
+  const wanted = ['localhost', '127.0.0.1', ...ips].sort().join(',');
+
+  try {
+    const saved = JSON.parse(fs.readFileSync(CERT_FILE, 'utf8'));
+    if (saved.key && saved.cert && saved.hosts === wanted && Date.now() < saved.expires) {
+      return { key: saved.key, cert: saved.cert };
+    }
+  } catch (e) {}
+
+  const selfsigned = require('selfsigned');
+  const altNames = [
+    { type: 2, value: 'localhost' },
+    { type: 7, ip: '127.0.0.1' },
+    ...ips.map(ip => ({ type: 7, ip }))
+  ];
+  const pems = await selfsigned.generate(
+    [{ name: 'commonName', value: 'StreamHub' }],
+    {
+      days: 825, keySize: 2048, algorithm: 'sha256',
+      extensions: [{ name: 'subjectAltName', altNames }]
+    }
+  );
+  const out = { key: pems.private, cert: pems.cert, hosts: wanted, expires: Date.now() + 800 * 24 * 3600 * 1000 };
+  try { fs.writeFileSync(CERT_FILE, JSON.stringify(out)); } catch (e) {}
+  return { key: out.key, cert: out.cert };
+}
+
 // ─── Inicialização com Suporte HTTPS e HTTP ─────────────────
 async function initServer() {
   let sslOptions = null;
   try {
-    const selfsigned = require('selfsigned');
-    const pems = await selfsigned.generate(
-      [{ name: 'commonName', value: '192.168.3.141' }],
-      { days: 365, keySize: 2048, algorithm: 'sha256' }
-    );
-    sslOptions = {
-      key: pems.private,
-      cert: pems.cert
-    };
+    sslOptions = await loadOrCreateCert();
     sslActive = true;
   } catch (err) {
     console.warn('[SSL] Aviso: não foi possível gerar SSL nativo. Iniciando em HTTP:', err.message);
   }
 
   server = sslOptions ? https.createServer(sslOptions, app) : http.createServer(app);
-  io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
+  io = new Server(server, {
+    cors: { origin: '*', methods: ['GET', 'POST'] },
+    pingInterval: 10000,
+    pingTimeout: 30000,        // tolera quedas curtas de rede sem derrubar a live
+    maxHttpBufferSize: 1e6
+  });
 
   setupSocketIo();
 
@@ -504,6 +607,7 @@ async function initServer() {
       console.log('============================================');
       console.log(`  🎬 App:  ${protocol}://localhost:${PORT}`);
       console.log(`  🔗 Rede: ${ips.map(i => `${protocol}://${i.address}:${PORT}`).join(' | ') || 'N/A'}`);
+      console.log('  📡 Mídia: WebRTC P2P direto (sem LiveKit)');
       console.log('============================================\n');
     });
 
@@ -521,4 +625,3 @@ async function initServer() {
 }
 
 initServer();
-

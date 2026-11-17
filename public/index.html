@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>StreamHub</title>
-  <meta name="description" content="Transmissão de vídeo em tempo real com latência ultra baixa via WebRTC.">
+  <meta name="description" content="Transmissão de vídeo em tempo real em alta qualidade, com latência ultra baixa.">
   <link rel="stylesheet" href="/css/style.css">
   <script>
     // Verificação de autenticação imediata
@@ -25,7 +25,7 @@
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
       </div>
       <span class="brand-title">StreamHub</span>
-      <span class="brand-badge">P2P Live</span>
+      <span class="brand-badge">HD Live</span>
     </a>
 
     <div class="header-status">
@@ -100,27 +100,20 @@
         <!-- HUD de Diagnóstico WebRTC em Tempo Real -->
         <div id="webrtcHud" class="webrtc-hud">
           <div class="hud-header">
-            <span>📡 Diagnóstico WebRTC</span>
+            <span>📡 Diagnóstico da Transmissão</span>
             <div style="display:flex;gap:6px;">
               <button id="btnCopyDiag" type="button" class="hud-btn" title="Copiar diagnóstico para colar no chat">Copiar Relatório</button>
               <button id="btnToggleHud" type="button" class="hud-btn">Minimizar</button>
             </div>
           </div>
           <div id="hudBody" class="hud-body">
-            <div class="hud-row"><span>Modo de Rede:</span>
-              <select id="selectStreamMode" style="background:#161b22;color:#58a6ff;border:1px solid #30363d;border-radius:4px;padding:2px 4px;font-size:11px;font-family:inherit;">
-                <option value="auto">🔄 Automático (WebRTC + Fallback)</option>
-                <option value="relay">⚡ Modo Garantido (WebSocket Relay)</option>
-                <option value="p2p">🚀 WebRTC P2P Direto</option>
-              </select>
-            </div>
             <div class="hud-row"><span>Sinalização:</span> <strong id="hudSocket">Conectando...</strong></div>
-            <div class="hud-row"><span>Conexão P2P (Peer):</span> <strong id="hudPeer">Iniciando...</strong></div>
-            <div class="hud-row"><span>Rede (ICE):</span> <strong id="hudIce">Aguardando...</strong></div>
-            <div class="hud-row"><span>IP Conectado:</span> <strong id="hudPeerIp">-</strong></div>
+            <div class="hud-row"><span>Servidor de Mídia:</span> <strong id="hudPeer">Iniciando...</strong></div>
+            <div class="hud-row"><span>Qualidade da Conexão:</span> <strong id="hudIce">Aguardando...</strong></div>
+            <div class="hud-row"><span>Perdas / Jitter:</span> <strong id="hudPeerIp">-</strong></div>
             <div class="hud-row"><span>Codec:</span> <strong id="hudCodec">-</strong></div>
             <div class="hud-row"><span>Dados Recebidos:</span> <strong id="hudBytes">0 KB</strong> (<span id="hudBitrate">0 kbps</span>)</div>
-            <div class="hud-row"><span>Frames Decodificados:</span> <strong id="hudFrames">0</strong></div>
+            <div class="hud-row"><span>Frames:</span> <strong id="hudFrames">0</strong></div>
             <div class="hud-row"><span>Resolução:</span> <strong id="hudRes">0x0</strong></div>
             <div class="hud-row"><span>Status Vídeo:</span> <strong id="hudVideoState">-</strong></div>
             <div class="hud-row hud-alert" id="hudAlertRow" style="display:none;"><strong id="hudAlertText"></strong></div>
@@ -159,8 +152,7 @@
             </div>
           </div>
           <div class="controls-right">
-            <button id="btnSwitchToRelay" class="ctrl-btn" title="Alternar para Modo Garantido (WebSocket Relay)" type="button" style="font-size:11px;font-weight:700;font-family:var(--mono);padding:0 8px;background:rgba(88,166,255,0.15);border:1px solid rgba(88,166,255,0.4);border-radius:4px;color:#58a6ff;">⚡ Relay</button>
-            <button id="btnOpenHud" class="ctrl-btn" title="Diagnóstico WebRTC" type="button" style="font-size:11px;font-weight:700;font-family:var(--mono);padding:0 6px;">HUD</button>
+                        <button id="btnOpenHud" class="ctrl-btn" title="Diagnóstico da transmissão" type="button" style="font-size:11px;font-weight:700;font-family:var(--mono);padding:0 6px;">HUD</button>
             <button id="btnPip" class="ctrl-btn" title="Picture in Picture">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="10" width="8" height="6" rx="1"/>
@@ -187,7 +179,7 @@
           <div class="stream-title-box">
             <h1 id="streamTitle">Transmissão ao Vivo</h1>
             <div class="stream-meta">
-              <span id="streamerByInfo">⚡ WebRTC P2P · Latência ultra baixa</span>
+              <span id="streamerByInfo">⚡ HD adaptativo · Latência ultra baixa</span>
             </div>
           </div>
         </div>
@@ -297,6 +289,23 @@
           <input type="text" id="studioTitleInput" class="input-message" style="width:100%" placeholder="Ex: Assistindo filme com a galera" value="Transmissão ao Vivo">
         </div>
 
+        <!-- Qualidade -->
+        <div class="stream-title-field">
+          <label>3. Qualidade da transmissão</label>
+          <div style="display:flex;gap:8px;">
+            <select id="studioQualitySelect" class="input-message" style="flex:2">
+              <option value="1080p60">1080p · 60 fps (8 Mbps) — jogos / movimento</option>
+              <option value="1080p30">1080p · 30 fps (5 Mbps) — filmes</option>
+              <option value="720p60">720p · 60 fps (4 Mbps) — internet média</option>
+              <option value="720p30">720p · 30 fps (2.5 Mbps) — internet fraca</option>
+            </select>
+            <select id="studioCodecSelect" class="input-message" style="flex:1" title="Codec de vídeo">
+              <option value="vp8">VP8 (compatível)</option>
+              <option value="h264">H.264 (usa GPU)</option>
+            </select>
+          </div>
+          <small style="color:var(--text-muted)">Cada espectador recebe automaticamente a melhor qualidade que a sua internet aguenta.</small>
+        </div>
         <!-- Monitor de Prévia do Streamer -->
         <div id="studioPreviewBox" style="display:none;background:#000;border:1px solid var(--border-sm);border-radius:10px;overflow:hidden;position:relative;">
           <video id="studioPreviewVideo" autoplay playsinline muted style="width:100%;max-height:220px;object-fit:contain;display:block;"></video>
@@ -322,6 +331,7 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="/js/common.js"></script>
+  <script src="/js/media.js"></script>
   <script src="/js/app.js"></script>
 </body>
 </html>

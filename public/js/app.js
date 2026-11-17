@@ -15,6 +15,7 @@ if (!appToken) {
 const socket = io({
   auth: { token: appToken }
 });
+window.__shSocket = socket;
 
 // Manipulador de erro de autenticação
 socket.on('auth-error', (err) => {
@@ -98,9 +99,6 @@ const btnStudioStart = document.getElementById('btnStudioStart');
 const btnStudioStop = document.getElementById('btnStudioStop');
 
 // 3. Estado da Aplicação
-let viewerPeerConn = null;
-let viewerIceQueue = [];
-
 let activeStreams = [];
 let watchingStreamId = null;
 let isWatchingSelf = false; // streamer vendo o próprio feed + chat
@@ -109,90 +107,30 @@ let currentBroadcastTitle = 'Minha transmissão';
 let isBroadcaster = false;
 let broadcasterStream = null;
 let broadcasterSourceType = 'screen'; // 'screen' | 'video' | 'camera'
-const broadcasterPeers = new Map(); // viewerId -> RTCPeerConnection
-const broadcasterIceQueues = new Map(); // viewerId -> [candidate]
 
-// ─── Transmissão Híbrida: WebSocket Relay Garantido (MSE) ───
-let streamMode = 'auto'; // 'auto' | 'relay' | 'p2p'
-let relayActive = false;
-let relayMediaSource = null;
-let relaySourceBuffer = null;
-let relayQueue = [];
-let relayAppending = false;
-let relayBytesTotal = 0;
-let relayLastBytes = 0;
-let relayLastTimestamp = Date.now();
-let relayInitReceived = false;
-let relayCurrentMime = 'video/webm; codecs="vp8,opus"';
-let webrtcFallbackTimer = null;
+// Camada de mídia (LiveKit SFU) — ver /js/media.js
+const QUALITY_LABELS = { excellent: 'Excelente', good: 'Boa', poor: 'Fraca', lost: 'Sem conexão', unknown: '...' };
 
-// Broadcaster MediaRecorder para WebSocket Relay
-let broadcasterRelayRecorder = null;
-let broadcasterRelayMime = null;
-let broadcasterFirstChunk = null;
-let lastRecorderRestart = 0;
-
-function startBroadcasterRelay(stream) {
-  stopBroadcasterRelay();
-  if (!stream) return;
-  const hasAudio = stream.getAudioTracks().length > 0;
-  broadcasterRelayMime = typeof getOptimalMediaMimeType === 'function' 
-    ? getOptimalMediaMimeType(hasAudio) 
-    : (hasAudio ? 'video/webm; codecs="vp8,opus"' : 'video/webm; codecs="vp8"');
-
-  try {
-    broadcasterRelayRecorder = new MediaRecorder(stream, {
-      mimeType: broadcasterRelayMime,
-      videoBitsPerSecond: 2500000
-    });
-    let isFirst = true;
-
-    broadcasterRelayRecorder.ondataavailable = async (e) => {
-      if (!isBroadcaster || !e.data || e.data.size === 0) return;
-      try {
-        const buffer = await e.data.arrayBuffer();
-        if (isFirst) {
-          isFirst = false;
-          broadcasterFirstChunk = buffer;
-          socket.emit('relay-init', { mimeType: broadcasterRelayMime, chunk: buffer });
-        } else {
-          socket.emit('relay-chunk', buffer);
-        }
-      } catch (err) {
-        console.warn('[Relay Host] Erro ao enviar buffer:', err);
-      }
-    };
-
-    broadcasterRelayRecorder.start(180);
-    console.log(`[Relay Host] Gravador ativado com sucesso: ${broadcasterRelayMime}`);
-  } catch (err) {
-    console.warn('[Relay Host] Falha ao iniciar MediaRecorder:', err);
+const publisher = new StreamMedia.Publisher({
+  onState: (state) => {
+    if (!isBroadcaster) return;
+    if (state === 'reconnecting') {
+      showToast('Reconectando ao servidor de mídia...', 'info');
+      if (transmitBtnText) transmitBtnText.textContent = 'Reconectando...';
+    } else if (state === 'connected') {
+      if (transmitBtnText) transmitBtnText.textContent = 'Transmitindo (Painel)';
+    }
+  },
+  onQuality: (q) => {
+    if (!isBroadcaster || !transmitBtnText) return;
+    transmitBtnText.textContent = `Transmitindo · Conexão ${QUALITY_LABELS[q] || q}`;
+    if (q === 'poor' || q === 'lost') showToast('Sua conexão de upload está instável.', 'error');
+  },
+  onFatal: (msg) => {
+    showToast(msg, 'error');
+    stopBroadcasting();
   }
-}
-
-function stopBroadcasterRelay() {
-  if (broadcasterRelayRecorder) {
-    try {
-      if (broadcasterRelayRecorder.state !== 'inactive') {
-        broadcasterRelayRecorder.stop();
-      }
-    } catch (e) {}
-    broadcasterRelayRecorder = null;
-  }
-  broadcasterFirstChunk = null;
-}
-
-function restartBroadcasterRelayKeyframe() {
-  if (!broadcasterRelayRecorder || broadcasterRelayRecorder.state !== 'recording') return;
-  const now = Date.now();
-  if (now - lastRecorderRestart < 1500) return;
-  lastRecorderRestart = now;
-  console.log('[Relay Host] Reiniciando recorder para fornecer Keyframe limpo ao novo espectador...');
-  stopBroadcasterRelay();
-  if (broadcasterStream) {
-    startBroadcasterRelay(broadcasterStream);
-  }
-}
+});
 
 // 4. Controle do Modal do Estúdio
 function openStudioModal() {
@@ -241,29 +179,41 @@ function setSourceType(type) {
 }
 
 // 7. Obter Mídia para Transmissão
+const studioQualitySelect = document.getElementById('studioQualitySelect');
+const studioCodecSelect = document.getElementById('studioCodecSelect');
+
+function currentQualityKey() {
+  return (studioQualitySelect && studioQualitySelect.value) || '1080p60';
+}
+
 async function captureBroadcasterStream() {
+  const vc = StreamMedia.videoConstraints(currentQualityKey());
+
   if (broadcasterSourceType === 'screen') {
+    const opts = {
+      video: { ...vc, cursor: 'always' },
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: 2,
+        sampleRate: 48000
+      },
+      systemAudio: 'include',
+      surfaceSwitching: 'include',
+      selfBrowserSurface: 'exclude'
+    };
     try {
-      return await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false
-        }
-      });
+      return await navigator.mediaDevices.getDisplayMedia(opts);
     } catch (dispErr) {
       if (dispErr.name === 'NotAllowedError') throw dispErr;
       console.warn('[Streamer] Captura com áudio falhou no SO, tentando sem áudio:', dispErr);
-      return await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false
-      });
+      return await navigator.mediaDevices.getDisplayMedia({ video: vc, audio: false });
     }
   } else if (broadcasterSourceType === 'camera') {
     return await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
-      audio: true
+      video: vc,
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     });
   } else if (broadcasterSourceType === 'video') {
     const file = studioVideoFileInput.files[0];
@@ -274,14 +224,18 @@ async function captureBroadcasterStream() {
     tempVideo.loop = true;
     tempVideo.playsInline = true;
     tempVideo.muted = false;
+    // mantém o <video> vivo mesmo fora da tela (evita travar a captura)
+    tempVideo.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;';
+    document.body.appendChild(tempVideo);
+    window.__broadcastFileVideo = tempVideo;
 
     await tempVideo.play();
 
     let stream = null;
     if (tempVideo.captureStream) {
-      stream = tempVideo.captureStream(30);
+      stream = tempVideo.captureStream();
     } else if (tempVideo.mozCaptureStream) {
-      stream = tempVideo.mozCaptureStream(30);
+      stream = tempVideo.mozCaptureStream();
     } else {
       throw new Error('Seu navegador não suporta captura direta de arquivo de vídeo.');
     }
@@ -310,19 +264,22 @@ if (btnStudioStart) {
         track.onended = () => stopBroadcasting();
       });
 
-      // Solicitar registro como streamer no socket
+      btnStudioStart.innerHTML = 'Conectando ao servidor de mídia...';
+      isBroadcaster = true;
+
+      // Publica no SFU ANTES de anunciar a live, para o vídeo já estar no ar quando alguém entrar
+      await publisher.start(broadcasterStream, {
+        preset: currentQualityKey(),
+        codec: (studioCodecSelect && studioCodecSelect.value) || 'vp8',
+        sourceType: broadcasterSourceType
+      });
+
       socket.emit('register-streamer');
 
       const streamTitle = (studioTitleInput && studioTitleInput.value.trim()) || 'Transmissão ao Vivo';
       currentBroadcastTitle = streamTitle;
+      socket.emit('stream-started', { title: streamTitle, type: broadcasterSourceType });
 
-      socket.emit('stream-started', {
-        title: streamTitle,
-        type: broadcasterSourceType
-      });
-
-      isBroadcaster = true;
-      startBroadcasterRelay(broadcasterStream);
       updateBroadcasterUI(true);
       showToast('Transmissão ao vivo iniciada com sucesso!', 'live');
       closeStudioModal();
@@ -358,18 +315,15 @@ function updateBroadcasterUI(live) {
 
 // 9. Parar Transmissão
 function stopBroadcasting() {
-  stopBroadcasterRelay();
+  publisher.stop();
   if (broadcasterStream) {
     broadcasterStream.getTracks().forEach(track => track.stop());
     broadcasterStream = null;
   }
-
-  // Fechar conexões P2P com todos os espectadores
-  broadcasterPeers.forEach((pc) => {
-    try { pc.close(); } catch(e){}
-  });
-  broadcasterPeers.clear();
-  broadcasterIceQueues.clear();
+  if (window.__broadcastFileVideo) {
+    try { window.__broadcastFileVideo.pause(); window.__broadcastFileVideo.remove(); } catch (e) {}
+    window.__broadcastFileVideo = null;
+  }
 
   if (isBroadcaster) {
     socket.emit('stream-stopped');
@@ -394,133 +348,16 @@ if (btnStudioStop) {
   });
 }
 
-// 10. WebRTC do Broadcaster: Quando um espectador se conecta
-socket.on('viewer-joined', async ({ viewerId, username: vUser }) => {
-  if (!isBroadcaster || !broadcasterStream) return;
-  console.log(`[Broadcaster] Novo espectador: ${vUser} (${viewerId}). Criando PeerConnection...`);
-
-  // Emite um Keyframe limpo no Relay WebSocket caso o novo espectador esteja em modo Relay
-  restartBroadcasterRelayKeyframe();
-
-  // Se já tinha conexão com esse viewer, fechar
-  if (broadcasterPeers.has(viewerId)) {
-    try { broadcasterPeers.get(viewerId).close(); } catch(e){}
-    broadcasterPeers.delete(viewerId);
-  }
-  broadcasterIceQueues.set(viewerId, []);
-
-  const pc = new RTCPeerConnection(RTC_CONFIG);
-  broadcasterPeers.set(viewerId, pc);
-
-  // Adicionar todas as tracks de áudio e vídeo
-  broadcasterStream.getTracks().forEach(track => {
-    if (track.kind === 'video') {
-      track.contentHint = 'motion';
-    }
-    const sender = pc.addTrack(track, broadcasterStream);
-    optimizeVideoSender(sender);
-  });
-
-  // Priorizar VP8 nos transceivers
-  configurePeerVideoCapabilities(pc);
-
-  // ICE candidates do Broadcaster para este espectador
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      socket.emit('webrtc-ice-candidate', {
-        targetId: viewerId,
-        candidate: event.candidate
-      });
-    }
-  };
-
-  pc.oniceconnectionstatechange = () => {
-    console.log(`[Broadcaster] ICE state com ${vUser}: ${pc.iceConnectionState}`);
-  };
-
-  pc.onconnectionstatechange = () => {
-    console.log(`[Broadcaster] Connection state com ${vUser}: ${pc.connectionState}`);
-  };
-
-  try {
-    const offer = await pc.createOffer({
-      offerToReceiveAudio: false,
-      offerToReceiveVideo: false
-    });
-    await pc.setLocalDescription(offer);
-
-    socket.emit('webrtc-offer', {
-      targetId: viewerId,
-      sdp: pc.localDescription
-    });
-    console.log(`[Broadcaster] Oferta WebRTC enviada com sucesso para ${vUser}`);
-  } catch (err) {
-    console.error(`[Broadcaster] Erro ao criar oferta para ${vUser}:`, err);
-  }
+// Se a aba for fechada/recarregada, encerra a live limpa
+window.addEventListener('beforeunload', () => {
+  if (isBroadcaster) socket.emit('stream-stopped');
 });
 
-// Resposta WebRTC do Viewer para o Broadcaster
-socket.on('webrtc-answer', async ({ senderId, sdp }) => {
-  if (!isBroadcaster) return;
-  const pc = broadcasterPeers.get(senderId);
-  if (!pc) return;
-
-  try {
-    console.log(`[Broadcaster] Resposta WebRTC recebida de ${senderId}`);
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-
-    // Processar fila de ICE candidates recebidos antes do remote description
-    const queue = broadcasterIceQueues.get(senderId) || [];
-    broadcasterIceQueues.set(senderId, []);
-    for (const candidate of queue) {
-      await addIceCandidateSafely(pc, candidate, 'Broadcaster');
-    }
-  } catch (err) {
-    console.error('[Broadcaster] Erro ao processar resposta do viewer:', err);
+// Ao reconectar o socket de sinalização com a live no ar, re-anuncia a live
+socket.on('connect', () => {
+  if (isBroadcaster && broadcasterStream) {
+    socket.emit('stream-started', { title: currentBroadcastTitle, type: broadcasterSourceType });
   }
-});
-
-// ICE candidate enviado pelo Viewer ao Broadcaster ou vice-versa
-socket.on('webrtc-ice-candidate', async ({ senderId, candidate }) => {
-  if (isBroadcaster) {
-    const pc = broadcasterPeers.get(senderId);
-    if (!pc) return;
-
-    if (pc.remoteDescription && pc.remoteDescription.type) {
-      await addIceCandidateSafely(pc, candidate, 'Broadcaster');
-    } else {
-      const queue = broadcasterIceQueues.get(senderId) || [];
-      queue.push(candidate);
-      broadcasterIceQueues.set(senderId, queue);
-    }
-  } else {
-    // Caso de uso: receptor é o Viewer
-    if (viewerPeerConn && viewerPeerConn.remoteDescription && viewerPeerConn.remoteDescription.type) {
-      await addIceCandidateSafely(viewerPeerConn, candidate, 'Viewer');
-    } else {
-      viewerIceQueue.push(candidate);
-    }
-  }
-});
-
-// Espectador desconectou
-socket.on('viewer-left', ({ viewerId }) => {
-  if (broadcasterPeers.has(viewerId)) {
-    try { broadcasterPeers.get(viewerId).close(); } catch(e){}
-    broadcasterPeers.delete(viewerId);
-    broadcasterIceQueues.delete(viewerId);
-  }
-});
-
-// Conflito de streamer
-socket.on('streamer-conflict', ({ message }) => {
-  showToast(message, 'error');
-  stopBroadcasting();
-});
-
-// Solicitação de keyframe do relay para o streamer
-socket.on('request-keyframe', () => {
-  restartBroadcasterRelayKeyframe();
 });
 
 // ============================================================
@@ -608,155 +445,40 @@ function renderLobby() {
     : `${activeStreams.length} lives disponíveis — clique para assistir`;
   activeStreams.forEach(s => lobbyGrid.appendChild(buildLiveCard(s)));
 }
-
-// ─── Lógica do Viewer com Relay Garantido (MSE) e Fallback ───
-
-function startRelayPlayback(mimeType, initChunk) {
-  stopRelayPlayback();
-  relayActive = true;
-  relayQueue = [];
-  relayBytesTotal = 0;
-  relayLastBytes = 0;
-  relayLastTimestamp = Date.now();
-
-  if (streamerByInfo && currentStreamMeta) {
-    streamerByInfo.innerHTML = `Transmitido por <strong>${escapeHtml(currentStreamMeta.username)}</strong> · ⚡ Relay WebSocket Garantido`;
+// ─── Viewer (LiveKit) ───────────────────────────────────────
+function setLiveBadge(live) {
+  if (!liveBadge) return;
+  if (live) {
+    liveBadge.classList.remove('offline');
+    liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
+  } else {
+    liveBadge.classList.add('offline');
+    liveBadge.innerHTML = `<span class="pulse-dot"></span> OFFLINE`;
   }
+}
 
-  if (!window.MediaSource) {
-    showToast('Seu navegador não suporta MediaSource para streaming garantido.', 'error');
-    return;
-  }
-
-  const ms = new MediaSource();
-  relayMediaSource = ms;
-  remoteVideo.srcObject = null;
-  remoteVideo.src = URL.createObjectURL(ms);
-
-  ms.addEventListener('sourceopen', () => {
-    if (relayMediaSource !== ms) return;
-    try {
-      const mime = (mimeType && MediaSource.isTypeSupported(mimeType)) 
-        ? mimeType 
-        : (typeof getOptimalMediaMimeType === 'function' ? getOptimalMediaMimeType(false) : 'video/webm; codecs="vp8"');
-      relayCurrentMime = mime;
-      const sb = ms.addSourceBuffer(mime);
-      // sb.mode permanece 'segments' (WebM no Chromium/Firefox não suporta 'sequence' e lança DOMException)
-      relaySourceBuffer = sb;
-
-      sb.addEventListener('updateend', () => {
-        relayAppending = false;
-        if (sb.buffered.length > 0) {
-          const rangeCount = sb.buffered.length;
-          const end = sb.buffered.end(rangeCount - 1);
-          const start = sb.buffered.start(rangeCount - 1);
-
-          // Pula gaps de conexão ou cola na ponta ao vivo (live edge)
-          if (!remoteVideo.seeking) {
-            if (remoteVideo.currentTime < start || (end - remoteVideo.currentTime > 0.8)) {
-              remoteVideo.currentTime = Math.max(start, end - 0.15);
-            }
-          }
-
-          // Inicia reprodução assim que o primeiro pedaço de vídeo estiver no buffer
-          if (remoteVideo.paused) {
-            const playPromise = remoteVideo.play();
-            if (playPromise !== undefined) {
-              playPromise.then(() => {
-                if (streamPlaceholder) streamPlaceholder.classList.add('hidden');
-                if (liveBadge) {
-                  liveBadge.classList.remove('offline');
-                  liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
-                }
-              }).catch(() => {
-                if (unmuteBanner) unmuteBanner.style.display = 'flex';
-              });
-            }
-          }
-
-          // Limpeza do início do buffer para poupar RAM
-          const overallStart = sb.buffered.start(0);
-          const trim = remoteVideo.currentTime - 10;
-          if (trim > overallStart + 5 && !sb.updating) {
-            try { sb.remove(overallStart, trim); return; } catch(e){}
-          }
-        }
-        pumpRelayQueue();
-      });
-
-      sb.addEventListener('error', (e) => {
-        console.warn('[Relay MSE] Erro no SourceBuffer:', e);
-      });
-
-      if (initChunk) {
-        relayQueue.push(initChunk);
-      }
-      pumpRelayQueue();
-
-    } catch (err) {
-      console.error('[Relay MSE] Erro ao adicionar SourceBuffer:', err);
+const viewer = new StreamMedia.Viewer(remoteVideo, {
+  onStatus: (text, level) => {
+    if (isWatchingSelf || !watchingStreamId) return;
+    // Só mostra o placeholder se ainda não há imagem na tela
+    if (!(remoteVideo.videoWidth > 0 && !remoteVideo.paused) || level === 'error') {
+      streamPlaceholder.classList.remove('hidden');
+      placeholderTitle.textContent = level === 'error' ? 'Falha na conexão' : 'Conectando à live...';
+      placeholderDesc.textContent = text;
+    } else if (level === 'info') {
+      showToast(text, 'info');
     }
-  }, { once: true });
-
-  // Iniciar mutado para garantir aprovação da política de autoplay dos navegadores
-  remoteVideo.muted = true;
-  updateMuteUI();
-}
-
-function stopRelayPlayback() {
-  relayActive = false;
-  relayQueue = [];
-  relayAppending = false;
-  relayInitReceived = false;
-  if (relaySourceBuffer) {
-    try {
-      if (relaySourceBuffer.updating) relaySourceBuffer.abort();
-    } catch(e){}
-    relaySourceBuffer = null;
+  },
+  onPlaying: () => {
+    streamPlaceholder.classList.add('hidden');
+    setLiveBadge(true);
+    if (btnPlayPause) btnPlayPause.innerHTML = ICON_PAUSE;
+  },
+  onNeedUnmute: () => {
+    updateMuteUI();
+    if (unmuteBanner) unmuteBanner.style.display = 'flex';
   }
-  if (relayMediaSource) {
-    try {
-      if (relayMediaSource.readyState === 'open') relayMediaSource.endOfStream();
-    } catch(e){}
-    relayMediaSource = null;
-  }
-}
-
-function pumpRelayQueue() {
-  if (!relaySourceBuffer || relayAppending || relaySourceBuffer.updating || relayQueue.length === 0) {
-    return;
-  }
-  const chunk = relayQueue.shift();
-  relayAppending = true;
-  try {
-    relaySourceBuffer.appendBuffer(chunk);
-    if (streamPlaceholder && remoteVideo.currentTime > 0) {
-      streamPlaceholder.classList.add('hidden');
-    }
-  } catch (err) {
-    relayAppending = false;
-    if (err && err.name === 'QuotaExceededError') {
-      try {
-        const start = relaySourceBuffer.buffered.start(0);
-        const trim = remoteVideo.currentTime - 4;
-        if (trim > start && !relaySourceBuffer.updating) relaySourceBuffer.remove(start, trim);
-      } catch(e){}
-    } else {
-      console.warn('[Relay MSE] appendBuffer:', err);
-    }
-    setTimeout(pumpRelayQueue, 40);
-  }
-}
-
-function activateRelayFallback(reason) {
-  if (relayActive) return;
-  console.log(`[Viewer] Ativando Relay Fallback (${reason})`);
-  showToast(reason, 'info');
-  closeViewerPeer();
-  relayActive = true;
-  socket.emit('request-relay-init', { streamerId: watchingStreamId });
-  socket.emit('request-keyframe', { streamerId: watchingStreamId });
-}
+});
 
 function startWatching(stream) {
   watchingStreamId = stream.id;
@@ -769,55 +491,20 @@ function startWatching(stream) {
     updateMuteUI();
   }
 
-  closeViewerPeer();
-  stopRelayPlayback();
-  clearTimeout(webrtcFallbackTimer);
+  viewer.disconnect(true);
 
   if (streamTitleEl) streamTitleEl.textContent = stream.title;
   remoteVideo.srcObject = null;
-  remoteVideo.src = '';
+  remoteVideo.removeAttribute('src');
   streamPlaceholder.classList.remove('hidden');
   placeholderTitle.textContent = 'Conectando à live...';
   placeholderDesc.textContent = 'Aguarde enquanto a transmissão é estabelecida.';
+  if (streamerByInfo) streamerByInfo.innerHTML = `Transmitido por <strong>${escapeHtml(stream.username)}</strong> · HD adaptativo`;
 
   showWatch();
   startHud();
   socket.emit('watch-stream', { streamerId: stream.id });
-
-  if (streamMode === 'relay') {
-    // Forçar modo Relay Garantido
-    activateRelayFallback('Conectando via Modo Garantido (Relay WebSocket)...');
-    return;
-  }
-
-  // Modo Automático ou P2P:
-  if (streamerByInfo) streamerByInfo.innerHTML = `Transmitido por <strong>${escapeHtml(stream.username)}</strong> · P2P WebRTC`;
-
-  setTimeout(() => {
-    if (watchingStreamId === stream.id && !remoteVideo.srcObject && !relayActive) {
-      socket.emit('request-offer');
-    }
-  }, 1200);
-
-  // Se estiver em modo 'auto', programa verificação de fallback inteligente
-  if (streamMode === 'auto') {
-    webrtcFallbackTimer = setTimeout(() => {
-      if (watchingStreamId === stream.id && !relayActive) {
-        const ice = viewerPeerConn ? viewerPeerConn.iceConnectionState : 'new';
-        if (ice === 'checking' || ice === 'failed' || ice === 'disconnected' || !remoteVideo.srcObject || remoteVideo.videoWidth === 0) {
-          activateRelayFallback('UDP P2P bloqueado pelo roteador/firewall. Fallback automático ativado!');
-        }
-      }
-    }, 4500);
-  }
-}
-
-function closeViewerPeer() {
-  if (viewerPeerConn) {
-    try { viewerPeerConn.close(); } catch (e) {}
-    viewerPeerConn = null;
-  }
-  viewerIceQueue = [];
+  viewer.connect(stream.id);
 }
 
 // Streamer vendo o próprio feed e participando do chat da própria live
@@ -830,8 +517,7 @@ function enterSelfView() {
   watchingStreamId = null;
   isWatchingSelf = true;
 
-  closeViewerPeer();
-  stopRelayPlayback();
+  viewer.disconnect(true);
 
   remoteVideo.srcObject = broadcasterStream;
   remoteVideo.muted = true; // evita eco do próprio áudio
@@ -852,18 +538,16 @@ function enterSelfView() {
 }
 
 function stopWatching() {
-  clearTimeout(webrtcFallbackTimer);
-  stopRelayPlayback();
   stopHud();
+  viewer.disconnect(true);
   if (watchingStreamId) {
     socket.emit('watch-stream', { streamerId: null });
     watchingStreamId = null;
   }
   isWatchingSelf = false;
   currentStreamMeta = null;
-  closeViewerPeer();
   remoteVideo.srcObject = null;
-  remoteVideo.src = '';
+  remoteVideo.removeAttribute('src');
   if (btnPlayPause) btnPlayPause.innerHTML = ICON_PLAY;
   showLobby();
 }
@@ -914,7 +598,7 @@ socket.on('stream-info', (stream) => {
   if (!stream || stream.id !== watchingStreamId) return;
   currentStreamMeta = stream;
   if (streamTitleEl) streamTitleEl.textContent = stream.title;
-  if (streamerByInfo) streamerByInfo.innerHTML = `Transmitido por <strong>${escapeHtml(stream.username)}</strong> · P2P WebRTC`;
+  if (streamerByInfo) streamerByInfo.innerHTML = `Transmitido por <strong>${escapeHtml(stream.username)}</strong> · HD adaptativo`;
 });
 
 // A live que estou assistindo foi encerrada
@@ -937,183 +621,20 @@ socket.on('viewer-count', (count) => {
   if (viewerCountEl) viewerCountEl.textContent = count;
 });
 
-// Receber oferta WebRTC do Broadcaster
-socket.on('webrtc-offer', async ({ senderId, sdp }) => {
-  if (!watchingStreamId || senderId !== watchingStreamId) return; // Só aceita a live que estou assistindo
-
-  console.log('[Viewer] Oferta WebRTC recebida do Broadcaster...');
-
-  try {
-    if (viewerPeerConn) {
-      try { viewerPeerConn.close(); } catch(e){}
-      viewerPeerConn = null;
-    }
-
-    viewerPeerConn = new RTCPeerConnection(RTC_CONFIG);
-
-    viewerPeerConn.ontrack = (event) => {
-      console.log('[Viewer] Track recebida:', event.track.kind, 'muted:', event.track.muted);
-      let stream = (event.streams && event.streams[0]) ? event.streams[0] : null;
-      if (!stream) {
-        if (!remoteVideo.srcObject) {
-          remoteVideo.srcObject = new MediaStream();
-        }
-        remoteVideo.srcObject.addTrack(event.track);
-      } else {
-        remoteVideo.srcObject = stream;
-      }
-
-      event.track.onunmute = () => {
-        console.log('[Viewer] Track pronta para renderização:', event.track.kind);
-        streamPlaceholder.classList.add('hidden');
-        liveBadge.classList.remove('offline');
-        liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
-      };
-
-      // Inicia mutado para contornar qualquer bloqueio de autoplay dos navegadores (evita tela preta)
-      remoteVideo.muted = true;
-      const playPromise = remoteVideo.play();
-      if (playPromise !== undefined) {
-        playPromise.then(() => {
-          if (btnPlayPause) btnPlayPause.innerHTML = ICON_PAUSE;
-          if (remoteVideo.videoWidth > 0) {
-            streamPlaceholder.classList.add('hidden');
-          }
-          // Tenta desmutar caso o navegador permita
-          remoteVideo.muted = false;
-          updateMuteUI();
-        }).catch(() => {
-          // Autoplay com áudio bloqueado: continua tocando o vídeo mutado e exibe banner
-          remoteVideo.muted = true;
-          remoteVideo.play().catch(() => {});
-          updateMuteUI();
-          if (unmuteBanner) unmuteBanner.style.display = 'flex';
-        });
-      }
-    };
-
-    viewerPeerConn.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit('webrtc-ice-candidate', {
-          targetId: senderId,
-          candidate: event.candidate
-        });
-      }
-    };
-
-    viewerPeerConn.oniceconnectionstatechange = () => {
-      const state = viewerPeerConn.iceConnectionState;
-      console.log(`[Viewer] ICE state: ${state}`);
-      if (state === 'connected' || state === 'completed') {
-        console.log('[Viewer] Conexão P2P com streamer estabelecida com sucesso!');
-        clearTimeout(webrtcFallbackTimer);
-      } else if (state === 'failed') {
-        console.warn('[Viewer] Conexão ICE falhou (bloqueio UDP P2P detectado).');
-        if (streamMode === 'auto' && !relayActive) {
-          activateRelayFallback('ICE falhou (UDP bloqueado). Conectando via Relay WebSocket garantido...');
-        } else if (streamMode === 'p2p') {
-          socket.emit('request-offer');
-        }
-      }
-    };
-
-    viewerPeerConn.onconnectionstatechange = () => {
-      console.log(`[Viewer] Connection state: ${viewerPeerConn.connectionState}`);
-      if (viewerPeerConn.connectionState === 'failed') {
-        if (streamMode === 'auto' && !relayActive) {
-          activateRelayFallback('Conexão WebRTC falhou. Ativando Relay WebSocket garantido...');
-        } else if (streamMode === 'p2p') {
-          socket.emit('request-offer');
-        }
-      }
-    };
-
-    await viewerPeerConn.setRemoteDescription(new RTCSessionDescription(sdp));
-
-    // Processar fila de ICE candidates recebidos antes ou durante o setRemoteDescription
-    const pendingCandidates = viewerIceQueue.splice(0, viewerIceQueue.length);
-    for (const c of pendingCandidates) {
-      await addIceCandidateSafely(viewerPeerConn, c, 'Viewer');
-    }
-
-    configurePeerVideoCapabilities(viewerPeerConn);
-
-    // Criar resposta
-    const answer = await viewerPeerConn.createAnswer();
-    await viewerPeerConn.setLocalDescription(answer);
-
-    socket.emit('webrtc-answer', {
-      targetId: senderId,
-      sdp: viewerPeerConn.localDescription
-    });
-    console.log('[Viewer] Resposta WebRTC enviada com sucesso para o Broadcaster');
-
-  } catch (err) {
-    console.error('[Viewer] Erro ao aceitar oferta WebRTC:', err);
-  }
-});
-
-// Receber cabeçalho de inicialização do Relay (EBML Header)
-socket.on('relay-init', ({ streamerId, mimeType, chunk }) => {
-  if (!watchingStreamId || (streamerId && streamerId !== watchingStreamId)) return;
-  if (!relayActive && streamMode === 'p2p') return;
-  console.log('[Viewer] relay-init recebido do servidor.');
-  relayInitReceived = true;
-  startRelayPlayback(mimeType, chunk);
-});
-
-// Receber fatia de vídeo/áudio em tempo real via WebSocket
-socket.on('relay-chunk', ({ streamerId, chunk }) => {
-  if (!watchingStreamId || (streamerId && streamerId !== watchingStreamId)) return;
-  if (!relayActive && streamMode !== 'relay') return;
-
-  const len = chunk.byteLength || (chunk.length || 0);
-  relayBytesTotal += len;
-
-  if (!relayMediaSource || !relaySourceBuffer) {
-    if (!relayInitReceived) {
-      socket.emit('request-relay-init', { streamerId: watchingStreamId });
-    }
-    return;
-  }
-
-  if (relayQueue.length > 60) {
-    relayQueue.splice(0, 15);
-  }
-  relayQueue.push(chunk);
-  pumpRelayQueue();
-});
-
 // Eventos de detecção de vídeo no elemento
 if (remoteVideo) {
   remoteVideo.addEventListener('loadedmetadata', () => {
-    console.log(`[Viewer] Resolução de vídeo: ${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`);
+    if (isWatchingSelf) return;
     if (remoteVideo.videoWidth > 0) {
       streamPlaceholder.classList.add('hidden');
-      liveBadge.classList.remove('offline');
-      liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
+      setLiveBadge(true);
     }
   });
 
   remoteVideo.addEventListener('playing', () => {
-    console.log('[Viewer] Vídeo está rodando ativamente.');
     streamPlaceholder.classList.add('hidden');
-    if (liveBadge) {
-      liveBadge.classList.remove('offline');
-      liveBadge.innerHTML = `<span class="pulse-dot"></span> AO VIVO`;
-    }
-  });
-
-  remoteVideo.addEventListener('waiting', () => {
-    if (relayActive && relaySourceBuffer && relaySourceBuffer.buffered.length > 0 && !remoteVideo.seeking) {
-      const lastRange = relaySourceBuffer.buffered.length - 1;
-      const end = relaySourceBuffer.buffered.end(lastRange);
-      const start = relaySourceBuffer.buffered.start(lastRange);
-      if (remoteVideo.currentTime < start || (end - remoteVideo.currentTime > 0.8)) {
-        remoteVideo.currentTime = Math.max(start, end - 0.15);
-        remoteVideo.play().catch(() => {});
-      }
-    }
+    setLiveBadge(true);
+    if (btnPlayPause) btnPlayPause.innerHTML = ICON_PAUSE;
   });
 }
 
@@ -1245,7 +766,7 @@ function escapeHtml(text) {
 }
 
 // ============================================================
-// 13. HUD de Diagnóstico WebRTC em Tempo Real
+// 13. HUD de Diagnóstico em Tempo Real
 // ============================================================
 let hudInterval = null;
 let lastBytes = 0;
@@ -1275,22 +796,22 @@ if (btnCopyDiag) {
     const reportText = JSON.stringify(lastStatsData, null, 2);
     if (navigator.clipboard) {
       navigator.clipboard.writeText(reportText).then(() => {
-        showToast('Relatório WebRTC copiado para a área de transferência!', 'success');
+        showToast('Relatório copiado para a área de transferência!', 'success');
       }).catch(() => {
-        prompt('Copie o relatório WebRTC:', reportText);
+        prompt('Copie o relatório:', reportText);
       });
     } else {
-      prompt('Copie o relatório WebRTC:', reportText);
+      prompt('Copie o relatório:', reportText);
     }
   });
 }
 
 function startHud() {
-  if (webrtcHud) webrtcHud.classList.remove('is-hidden');
+  // O HUD começa escondido (modo limpo); o botão "HUD" abre quando precisar
+  if (webrtcHud) webrtcHud.classList.add('is-hidden');
   if (hudInterval) clearInterval(hudInterval);
   lastBytes = 0;
   lastTimestamp = Date.now();
-  updateHud();
   hudInterval = setInterval(updateHud, 1000);
 }
 
@@ -1300,209 +821,71 @@ function stopHud() {
   if (webrtcHud) webrtcHud.classList.add('is-hidden');
 }
 
+const QUALITY_COLORS = { excellent: '#51cf66', good: '#94d82d', poor: '#fcc419', lost: '#ff6b6b', unknown: '#8b949e' };
+
 async function updateHud() {
-  const hudSocket = document.getElementById('hudSocket');
-  const hudPeer = document.getElementById('hudPeer');
-  const hudIce = document.getElementById('hudIce');
-  const hudPeerIp = document.getElementById('hudPeerIp');
-  const hudCodec = document.getElementById('hudCodec');
-  const hudBytes = document.getElementById('hudBytes');
-  const hudBitrate = document.getElementById('hudBitrate');
-  const hudFrames = document.getElementById('hudFrames');
-  const hudRes = document.getElementById('hudRes');
-  const hudVideoState = document.getElementById('hudVideoState');
-  const hudAlertRow = document.getElementById('hudAlertRow');
-  const hudAlertText = document.getElementById('hudAlertText');
+  const $ = (id) => document.getElementById(id);
+  if (!$('hudSocket') || !webrtcHud || webrtcHud.classList.contains('is-hidden')) return;
 
-  if (!hudSocket) return;
+  $('hudSocket').textContent = socket && socket.connected ? `Conectado (${socket.id?.substring(0, 5)})` : 'Desconectado';
 
-  hudSocket.textContent = socket && socket.connected ? `Conectado (${socket.id?.substring(0, 5)})` : 'Desconectado';
+  const s = await viewer.getStats();
 
-  const selectStreamMode = document.getElementById('selectStreamMode');
-  if (selectStreamMode && selectStreamMode.value !== streamMode) {
-    selectStreamMode.value = streamMode;
-  }
+  const stateEl = $('hudPeer');
+  stateEl.textContent = s.state === 'connected' ? 'Conectado (SFU)' : s.state;
+  stateEl.style.color = s.state === 'connected' ? '#51cf66' : (s.state === 'disconnected' ? '#ff6b6b' : '#fcc419');
 
-  if (relayActive) {
-    if (hudPeer) { hudPeer.textContent = 'Relay Conectado'; hudPeer.style.color = '#51cf66'; }
-    if (hudIce) { hudIce.textContent = 'TCP Porta 7070 (Bypass AP/UDP OK)'; hudIce.style.color = '#51cf66'; }
-    if (hudPeerIp) { hudPeerIp.textContent = 'Servidor Node.js (Local)'; }
-    if (hudCodec) { hudCodec.textContent = relayCurrentMime.includes('vp9') ? 'VP9 / Opus (MSE)' : 'VP8 / Opus (MSE)'; }
+  const q = s.quality || 'unknown';
+  const qEl = $('hudIce');
+  qEl.textContent = QUALITY_LABELS[q] || q;
+  qEl.style.color = QUALITY_COLORS[q] || '#8b949e';
 
-    const now = Date.now();
-    const dt = (now - relayLastTimestamp) / 1000;
-    const bitrate = dt > 0 ? Math.round(((relayBytesTotal - relayLastBytes) * 8) / dt / 1000) : 0;
-    relayLastBytes = relayBytesTotal;
-    relayLastTimestamp = now;
+  const bytes = s.bytesReceived || 0;
+  const now = Date.now();
+  const dt = (now - lastTimestamp) / 1000;
+  const bitrate = dt > 0 && lastBytes > 0 ? Math.round(((bytes - lastBytes) * 8) / dt / 1000) : 0;
+  lastBytes = bytes;
+  lastTimestamp = now;
 
-    if (hudBytes) hudBytes.textContent = (relayBytesTotal > 1048576) ? (relayBytesTotal / 1048576).toFixed(2) + ' MB' : Math.round(relayBytesTotal / 1024) + ' KB';
-    if (hudBitrate) hudBitrate.textContent = Math.max(0, bitrate) + ' kbps';
-    if (hudFrames) hudFrames.textContent = '-';
-    if (hudRes) hudRes.textContent = `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`;
+  const w = remoteVideo.videoWidth, h = remoteVideo.videoHeight;
+  $('hudBytes').textContent = bytes > 1048576 ? (bytes / 1048576).toFixed(2) + ' MB' : Math.round(bytes / 1024) + ' KB';
+  $('hudBitrate').textContent = Math.max(0, bitrate) + ' kbps';
+  $('hudFrames').textContent = `${s.framesDecoded || 0} (${Math.round(s.framesPerSecond || 0)} fps, ${s.framesDropped || 0} perdidos)`;
+  $('hudRes').textContent = `${w}x${h}`;
+  $('hudCodec').textContent = (s.mimeType || s.codec || '-').toString().replace('video/', '');
+  $('hudPeerIp').textContent = `${s.packetsLost || 0} pacotes perdidos · jitter ${s.jitter != null ? Math.round(s.jitter * 1000) + ' ms' : '-'}`;
 
-    if (hudVideoState) {
-      if (remoteVideo.videoWidth > 0 && !remoteVideo.paused) {
-        hudVideoState.textContent = 'Reproduzindo (Relay)';
-        hudVideoState.style.color = '#51cf66';
-      } else if (remoteVideo.paused) {
-        hudVideoState.textContent = 'Pausado';
-        hudVideoState.style.color = '#ff6b6b';
-      } else {
-        hudVideoState.textContent = 'Bufferizando...';
-        hudVideoState.style.color = '#fcc419';
-      }
-    }
-
-    if (hudAlertRow) hudAlertRow.style.display = 'block';
-    if (hudAlertText) hudAlertText.textContent = '⚡ Modo Garantido Ativo: Transmissão fluindo via WebSocket TCP através do servidor Node.js (imune a bloqueios de portas UDP/AP Isolation).';
-
-    lastStatsData = {
-      streamId: watchingStreamId,
-      mode: 'relay',
-      peerState: 'relay-connected',
-      iceState: 'tcp-relay',
-      peerIp: 'node-server',
-      codec: relayCurrentMime,
-      bytesReceived: relayBytesTotal,
-      bitrateKbps: bitrate,
-      resolution: `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`,
-      videoPaused: remoteVideo.paused,
-      videoMuted: remoteVideo.muted
-    };
-    return;
-  }
-
-  if (!viewerPeerConn) {
-    if (hudPeer) { hudPeer.textContent = 'Aguardando oferta...'; hudPeer.style.color = '#8b949e'; }
-    if (hudIce) { hudIce.textContent = 'Aguardando...'; hudIce.style.color = '#8b949e'; }
-    if (hudAlertRow) hudAlertRow.style.display = 'none';
-    return;
-  }
-
-  const peerState = viewerPeerConn.connectionState || 'new';
-  const iceState = viewerPeerConn.iceConnectionState || 'new';
-
-  if (hudPeer) {
-    hudPeer.textContent = peerState;
-    hudPeer.style.color = (peerState === 'connected') ? '#51cf66' : (peerState === 'failed' ? '#ff6b6b' : '#fcc419');
-  }
-
-  if (hudIce) {
-    hudIce.textContent = iceState;
-    hudIce.style.color = (iceState === 'connected' || iceState === 'completed') ? '#51cf66' : (iceState === 'failed' ? '#ff6b6b' : '#fcc419');
-  }
-
-  if (iceState === 'failed') {
-    if (hudAlertRow) hudAlertRow.style.display = 'block';
-    if (hudAlertText) hudAlertText.textContent = '⚠️ ICE FAILED: Bloqueio de rede UDP P2P (verifique firewall do Linux Mint ou isolamento de Wi-Fi).';
-  } else if (iceState === 'checking') {
-    if (hudAlertRow) hudAlertRow.style.display = 'block';
-    if (hudAlertText) hudAlertText.textContent = '⏳ Testando portas e rotas locais (ICE checking)...';
-  } else if (iceState === 'disconnected') {
-    if (hudAlertRow) hudAlertRow.style.display = 'block';
-    if (hudAlertText) hudAlertText.textContent = '⚠️ Conexão P2P instável ou interrompida.';
+  const vs = $('hudVideoState');
+  if (w > 0 && !remoteVideo.paused && (s.framesDecoded || 0) > 0) {
+    vs.textContent = 'Reproduzindo'; vs.style.color = '#51cf66';
+  } else if (remoteVideo.paused) {
+    vs.textContent = 'Pausado'; vs.style.color = '#ff6b6b';
   } else {
-    if (hudAlertRow) hudAlertRow.style.display = 'none';
+    vs.textContent = 'Aguardando fluxo...'; vs.style.color = '#fcc419';
   }
 
-  try {
-    const stats = await viewerPeerConn.getStats();
-    let bytes = 0;
-    let frames = 0;
-    let codec = '-';
-    let peerIp = '-';
-
-    stats.forEach(report => {
-      if (report.type === 'inbound-rtp' && report.kind === 'video') {
-        bytes = report.bytesReceived || 0;
-        frames = report.framesDecoded || 0;
-        if (report.codecId) {
-          const c = stats.get(report.codecId);
-          if (c) codec = (c.mimeType || c.payloadType || '').replace('video/', '');
-        }
-      }
-      if (report.type === 'candidate-pair' && (report.state === 'succeeded' || report.nominated)) {
-        const remoteCand = stats.get(report.remoteCandidateId);
-        if (remoteCand) {
-          peerIp = `${remoteCand.address || remoteCand.ip}:${remoteCand.port} (${remoteCand.candidateType})`;
-        }
-      }
-    });
-
-    const now = Date.now();
-    const dt = (now - lastTimestamp) / 1000;
-    const bitrate = dt > 0 ? Math.round(((bytes - lastBytes) * 8) / dt / 1000) : 0;
-    lastBytes = bytes;
-    lastTimestamp = now;
-
-    if (hudBytes) hudBytes.textContent = (bytes > 1048576) ? (bytes / 1048576).toFixed(2) + ' MB' : Math.round(bytes / 1024) + ' KB';
-    if (hudBitrate) hudBitrate.textContent = Math.max(0, bitrate) + ' kbps';
-    if (hudFrames) hudFrames.textContent = frames;
-    if (hudCodec) hudCodec.textContent = codec;
-    if (hudPeerIp) hudPeerIp.textContent = peerIp;
-    if (hudRes) hudRes.textContent = `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`;
-
-    if (hudVideoState) {
-      if (remoteVideo.videoWidth > 0 && !remoteVideo.paused && frames > 0) {
-        hudVideoState.textContent = 'Reproduzindo';
-        hudVideoState.style.color = '#51cf66';
-      } else if (remoteVideo.paused) {
-        hudVideoState.textContent = 'Pausado';
-        hudVideoState.style.color = '#ff6b6b';
-      } else if (bytes > 0 && frames === 0) {
-        hudVideoState.textContent = 'Aguardando Keyframe';
-        hudVideoState.style.color = '#fcc419';
-      } else {
-        hudVideoState.textContent = 'Aguardando fluxo...';
-        hudVideoState.style.color = '#8b949e';
-      }
-    }
-
-    lastStatsData = {
-      streamId: watchingStreamId,
-      peerState,
-      iceState,
-      peerIp,
-      codec,
-      bytesReceived: bytes,
-      bitrateKbps: bitrate,
-      framesDecoded: frames,
-      resolution: `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`,
-      videoPaused: remoteVideo.paused,
-      videoMuted: remoteVideo.muted
-    };
-
-  } catch (e) {
-    console.warn('[HUD] getStats aviso:', e.message);
+  const alertRow = $('hudAlertRow');
+  if (q === 'poor' || q === 'lost') {
+    alertRow.style.display = 'block';
+    $('hudAlertText').textContent = '⚠️ Conexão fraca: a qualidade do vídeo é reduzida automaticamente para evitar travamentos.';
+  } else {
+    alertRow.style.display = 'none';
   }
-}
 
-// 14. Controles de Seleção de Modo (Relay / P2P / Auto)
-const selectStreamMode = document.getElementById('selectStreamMode');
-if (selectStreamMode) {
-  selectStreamMode.addEventListener('change', (e) => {
-    streamMode = e.target.value;
-    if (streamMode === 'relay' && !relayActive && watchingStreamId) {
-      activateRelayFallback('Modo Garantido (WebSocket Relay) selecionado manualmente.');
-    } else if (streamMode === 'p2p' && relayActive && watchingStreamId) {
-      stopRelayPlayback();
-      showToast('Tentando modo WebRTC P2P...', 'info');
-      startWatching(currentStreamMeta);
-    }
-  });
-}
-
-const btnSwitchToRelay = document.getElementById('btnSwitchToRelay');
-if (btnSwitchToRelay) {
-  btnSwitchToRelay.addEventListener('click', () => {
-    if (!watchingStreamId) return;
-    if (!relayActive) {
-      streamMode = 'relay';
-      const sel = document.getElementById('selectStreamMode');
-      if (sel) sel.value = 'relay';
-      activateRelayFallback('Alternado para Modo Garantido (WebSocket Relay)!');
-    } else {
-      showToast('O Modo Garantido (Relay) já está ativo e transmitindo!', 'info');
-    }
-  });
+  lastStatsData = {
+    streamId: watchingStreamId,
+    state: s.state,
+    quality: q,
+    codec: s.mimeType || null,
+    bytesReceived: bytes,
+    bitrateKbps: bitrate,
+    framesDecoded: s.framesDecoded,
+    framesDropped: s.framesDropped,
+    fps: s.framesPerSecond,
+    packetsLost: s.packetsLost,
+    jitter: s.jitter,
+    resolution: `${w}x${h}`,
+    videoPaused: remoteVideo.paused,
+    videoMuted: remoteVideo.muted
+  };
 }

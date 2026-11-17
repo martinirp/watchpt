@@ -4,3 +4,9 @@ data/*.pid
 *.pid
 .env
 *.log
+
+livekit/livekit-server.exe
+livekit/livekit.yaml
+data/livekit.json
+data/sessions.json
+data/cert.json
