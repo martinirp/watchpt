@@ -86,6 +86,22 @@ function getSession(token) {
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+app.get('/api/ice-servers', (_req, res) => {
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+  ];
+  if (process.env.TURN_URLS) {
+    const turn = { urls: process.env.TURN_URLS.split(',').map(s => s.trim()).filter(Boolean) };
+    if (process.env.TURN_USERNAME) turn.username = process.env.TURN_USERNAME;
+    if (process.env.TURN_CREDENTIAL) turn.credential = process.env.TURN_CREDENTIAL;
+    iceServers.push(turn);
+  }
+  res.json({ iceServers });
+});
+
 // ─── Auth endpoints ────────────────────────────────────────
 app.post('/api/register', (req, res) => {
   const { username, password } = req.body || {};

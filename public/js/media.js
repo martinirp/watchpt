@@ -7,8 +7,22 @@
   const ICE_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' }
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
   ];
+
+  async function getIceServers() {
+    try {
+      const res = await fetch('/api/ice-servers');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.iceServers) && data.iceServers.length) {
+          return data.iceServers;
+        }
+      }
+    } catch (e) {}
+    return ICE_SERVERS;
+  }
 
   const ConnectionQuality = {
     Excellent: 'excellent',
@@ -142,13 +156,20 @@
 
     async _createPeerForViewer(viewerId) {
       if (this.stopped || !this.stream || !viewerId) return;
+      const prev = this.peers.get(viewerId);
+      if (prev && (Date.now() - prev.createdAt) < 1500 && prev.pc.connectionState !== 'failed') {
+        return; // evita recriar peer durante handshake em andamento
+      }
       this._closePeer(viewerId);
 
       const s = getSocket();
       if (!s) return;
 
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-      const entry = { pc, pendingIce: [] };
+      const iceServers = await getIceServers();
+      if (this.stopped) return;
+
+      const pc = new RTCPeerConnection({ iceServers });
+      const entry = { pc, pendingIce: [], createdAt: Date.now() };
       this.peers.set(viewerId, entry);
 
       for (const track of this.stream.getTracks()) {
@@ -266,7 +287,7 @@
           if (attempt === this.attempt && !this.pc && this.streamId) {
             s.emit('rtc-ready', { to: this.streamId });
           }
-        }, 400);
+        }, 2500);
       }
     }
 
@@ -276,7 +297,9 @@
       this.pendingIce = [];
 
       const s = getSocket();
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const iceServers = await getIceServers();
+      if (attempt !== this.attempt) return;
+      const pc = new RTCPeerConnection({ iceServers });
       this.pc = pc;
       const remoteStream = new MediaStream();
 
